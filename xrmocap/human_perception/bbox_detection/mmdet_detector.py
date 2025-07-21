@@ -90,23 +90,14 @@ class MMdetDetector:
                     list_batch.append(img)
                 img_batch = list_batch
             mmdet_results = inference_detector(self.det_model, img_batch)
-            additional_ret = True
             for frame_result in mmdet_results:
-                if len(frame_result) != 2:
-                    additional_ret = False
-                    break
-                for bbox_result in frame_result:
-                    if isinstance(bbox_result, np.ndarray) and \
-                            bbox_result.shape == (0, 5):
-                        additional_ret = False
-                        break
-                if not additional_ret:
-                    break
-            # For models like HTC
-            if additional_ret:
-                bbox_results += [i[0] for i in mmdet_results]
-            else:
-                bbox_results += mmdet_results
+                pred_instances = frame_result.pred_instances
+                human_mask = pred_instances.labels == 0
+
+                # Add detected humans
+                if len(human_mask) > 0:
+                    bbox_results += [[[a,b,c,d,s] for (a,b,c,d),s in zip(pred_instances.bboxes[human_mask], pred_instances.scores[human_mask])]]
+
         ret_list = process_mmdet_results(
             bbox_results, multi_person=multi_person)
         return ret_list
