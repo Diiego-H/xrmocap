@@ -27,6 +27,9 @@ from xrmocap.transform.keypoints3d.optim.builder import (
 )
 from .base_estimator import BaseEstimator
 
+from mmdet.utils import register_all_modules as register_det_modules
+from mmpose.utils import register_all_modules as register_pose_modules
+
 # yapf: enable
 
 
@@ -92,12 +95,14 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
         super().__init__(work_dir, verbose, logger)
         self.load_batch_size = load_batch_size
 
+        register_det_modules()
         if isinstance(bbox_detector, dict):
             bbox_detector['logger'] = logger
             self.bbox_detector = build_detector(bbox_detector)
         else:
             self.bbox_detector = bbox_detector
 
+        register_pose_modules()
         if isinstance(kps2d_estimator, dict):
             kps2d_estimator['logger'] = logger
             self.kps2d_estimator = build_detector(kps2d_estimator)
@@ -253,10 +258,12 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
         ret_list = []
         for view_index in range(img_arr.shape[0]):
             view_img_arr = img_arr[view_index]
+            register_det_modules()
             bbox_list = self.bbox_detector.infer_array(
                 image_array=view_img_arr,
                 disable_tqdm=(not self.verbose),
                 multi_person=False)
+            register_pose_modules()
             kps2d_list, _, _ = self.kps2d_estimator.infer_array(
                 image_array=view_img_arr,
                 bbox_list=bbox_list,
