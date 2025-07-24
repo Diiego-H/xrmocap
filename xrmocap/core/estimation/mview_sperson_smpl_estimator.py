@@ -163,92 +163,38 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
                     kps3d_optim = build_keypoints3d_optimizer(kps3d_optim)
                 self.kps3d_optimizers.append(kps3d_optim)
 
-    @overload
-    def run(
-        self, img_arr: np.ndarray, cam_param: List[FisheyeCameraParameter]
-    ) -> Tuple[List[Keypoints], Keypoints, SMPLData]:
-        ...
-
-    @overload
-    def run(
-        self, img_paths: List[List[str]],
-        cam_param: List[FisheyeCameraParameter]
-    ) -> Tuple[List[Keypoints], Keypoints, SMPLData]:
-        ...
-
-    @overload
-    def run(
-        self, video_path: List[str], cam_param: List[FisheyeCameraParameter]
-    ) -> Tuple[List[Keypoints], Keypoints, SMPLData]:
-        ...
-
     def run(
         self,
         cam_param: List[FisheyeCameraParameter],
-        img_arr: Union[None, np.ndarray] = None,
-        img_paths: Union[None, List[List[str]]] = None,
-        video_paths: Union[None, List[str]] = None,
+        img_arr: Union[List, np.ndarray],
         init_smpl_data: Union[None, SMPLData] = None,
     ) -> Tuple[List[Keypoints], Keypoints, SMPLData]:
-        """Run mutli-view single-person smpl estimator once. run() needs one
-        images input among [img_arr, img_paths, video_paths].
+        """Run multi-view single-person SMPL estimator.
 
         Args:
             cam_param (List[FisheyeCameraParameter]):
                 A list of FisheyeCameraParameter instances.
-            img_arr (Union[None, np.ndarray], optional):
-                A multi-view image array, in shape
-                [n_view, n_frame, h, w, c]. Defaults to None.
-            img_paths (Union[None, List[List[str]]], optional):
-                A nested list of image paths, in shape
-                [n_view, n_frame]. Defaults to None.
-            video_paths (Union[None, List[str]], optional):
-                A list of video paths, each is a view.
-                Defaults to None.
+            img_arr (Union[List, np.ndarray]):
+                A list (or array) of multi-view images, in shape [n_view, n_frame, h, w, c].
 
         Returns:
             Tuple[List[Keypoints], Keypoints, SMPLData]:
                 A list of kps2d, an instance of Keypoints 3d,
                 an instance of SMPLData.
         """
-        input_list = [img_arr, img_paths, video_paths]
-        input_count = 0
-        for input_instance in input_list:
-            if input_instance is not None:
-                input_count += 1
-        if input_count > 1:
-            self.logger.error('Redundant input!\n' +
-                              'Please offer only one among' +
-                              ' img_arr, img_paths and video_paths.')
-            raise ValueError
-        if img_arr is not None:
-            mview_img_arr = img_arr
-        elif img_paths is not None:
-            mview_img_arr = load_multiview_images(img_paths)
-        elif video_paths is not None:
-            mview_img_list = []
-            for video_path in video_paths:
-                sv_img_arr = video_to_array(input_path=video_path)
-                mview_img_list.append(sv_img_arr)
-            mview_img_arr = np.asarray(mview_img_list)
-        else:
-            self.logger.error('No image input has been found!\n' +
-                              'img_arr, img_paths and video_paths are None.')
-            raise ValueError
-        keypoints2d_list = self.estimate_keypoints2d(img_arr=mview_img_arr)
+        keypoints2d_list = self.estimate_keypoints2d(img_arr=img_arr)
         keypoints3d = self.estimate_keypoints3d(
             cam_param=cam_param, keypoints2d_list=keypoints2d_list)
         smpl_data = self.estimate_smpl(
             keypoints3d=keypoints3d, init_smpl_data=init_smpl_data)
         return keypoints2d_list, keypoints3d, smpl_data
 
-    def estimate_keypoints2d(self, img_arr: np.ndarray) -> List[Keypoints]:
+    def estimate_keypoints2d(self, img_arr: Union[List, np.ndarray]) -> List[Keypoints]:
         """Estimate keypoints2d in a top-down way.
 
         Args:
-            img_arr (np.ndarray):
-                A multi-view image array, in shape
-                [n_view, n_frame, h, w, c].
+            img_arr (Union[List, np.ndarray]):
+                A list (or array) of multi-view images, in shape [n_view, n_frame, h, w, c].
 
         Returns:
             List[Keypoints]:
@@ -256,7 +202,7 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
         """
         self.logger.info('Estimating keypoints2d.')
         ret_list = []
-        for view_index in range(img_arr.shape[0]):
+        for view_index in range(len(img_arr)):
             view_img_arr = img_arr[view_index]
             register_det_modules()
             bbox_list = self.bbox_detector.infer_array(
@@ -264,7 +210,7 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
                 disable_tqdm=(not self.verbose),
                 multi_person=False)
             register_pose_modules()
-            kps2d_list, _, _ = self.kps2d_estimator.infer_array(
+            kps2d_list = self.kps2d_estimator.infer_array(
                 image_array=view_img_arr,
                 bbox_list=bbox_list,
                 disable_tqdm=(not self.verbose),
@@ -319,8 +265,7 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
         mview_mask = np.asarray(mask_list)
         mview_mask = np.expand_dims(mview_mask, -1)
         # select camera
-        cam_indexes = self.select_camera(cam_param, mview_kps2d_arr,
-                                         mview_mask)
+        cam_indexes = self.select_camera(cam_param, mview_kps2d_arr, mview_mask)
         self.triangulator.set_cameras(cam_param)
         selected_triangulator = self.triangulator[cam_indexes]
         mview_kps2d_arr = mview_kps2d_arr[np.asarray(cam_indexes), ...]
