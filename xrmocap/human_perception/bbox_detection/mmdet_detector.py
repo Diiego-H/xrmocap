@@ -73,8 +73,8 @@ class MMdetDetector:
         Returns:
             list:
                 List of bboxes. Shape of the nested lists is
-                (n_frame, n_human, 5)
-                and each bbox is (x, y, x, y, score).
+                (n_frame, n_human, 4)
+                and each bbox is (x, y, x, y).
         """
         ret_list = []
         bbox_results = []
@@ -92,11 +92,9 @@ class MMdetDetector:
             mmdet_results = inference_detector(self.det_model, img_batch)
             for frame_result in mmdet_results:
                 pred_instances = frame_result.pred_instances
-                human_mask = pred_instances.labels == 0
 
-                # Add detected humans
-                if len(human_mask) > 0:
-                    bbox_results += [[[a,b,c,d,s] for (a,b,c,d),s in zip(pred_instances.bboxes[human_mask], pred_instances.scores[human_mask])]]
+                # Add detected humans (detach tensor from GPU)
+                bbox_results.append([pred_instances.bboxes[pred_instances.labels == 0].cpu().numpy()])
 
         ret_list = process_mmdet_results(
             bbox_results, multi_person=multi_person)
@@ -190,7 +188,7 @@ def process_mmdet_results(mmdet_results: list,
             Result of mmdet.apis.inference_detector
             when the input is a batch.
             Shape of the nested lists is
-            (n_frame, n_category, n_human, 5).
+            (n_frame, n_category, n_human, 4).
         cat_id (int, optional):
             Category ID. This function will only select
             the selected category, and drop the others.
@@ -206,17 +204,23 @@ def process_mmdet_results(mmdet_results: list,
         list:
             A list of detected bounding boxes.
             Shape of the nested lists is
-            (n_frame, n_human, 5)
-            and each bbox is (x, y, x, y, score).
+            (n_frame, n_human, 4)
+            and each bbox is (x, y, x, y).
     """
     ret_list = []
     only_max_arg = not multi_person
     for _, frame_results in enumerate(mmdet_results):
         cat_bboxes = frame_results[cat_id]
-        sorted_bbox = qsort_bbox_list(cat_bboxes, only_max_arg)
 
-        if only_max_arg:
-            ret_list.append(sorted_bbox[0:1])
+        # Check detected humans
+        if len(cat_bboxes) > 0:
+            sorted_bbox = qsort_bbox_list(cat_bboxes, only_max_arg)
+
+            if only_max_arg:
+                ret_list.append(sorted_bbox[0:1])
+            else:
+                ret_list.append(sorted_bbox)
+        
         else:
-            ret_list.append(sorted_bbox)
+            ret_list.append([])
     return ret_list
