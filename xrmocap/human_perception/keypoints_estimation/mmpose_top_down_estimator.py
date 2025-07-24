@@ -63,7 +63,7 @@ class MMposeTopDownEstimator:
                 a key of KEYPOINTS_FACTORY.
         """
         return __translate_data_source__(
-            self.pose_model.cfg.data['test']['type'])
+            self.pose_model.cfg.test_dataloader.dataset.type)
 
     def infer_array(self,
                     image_array: Union[np.ndarray, list],
@@ -107,47 +107,35 @@ class MMposeTopDownEstimator:
                     if there's no keypoints detected in some bbox.
         """
         ret_kps_list = []
-        ret_heatmap_list = []
-        ret_bbox_list = []
         n_frame = len(image_array)
         n_kps = get_keypoint_num(self.get_keypoints_convention_name())
         for start_index in tqdm(
                 range(0, n_frame, self.batch_size), disable=disable_tqdm):
             end_index = min(n_frame, start_index + self.batch_size)
             # mmpose takes only one frame
-            img_arr = image_array[start_index]
-            person_results = []
-            for frame_index in range(start_index, end_index, 1):
-                bboxes_in_frame = []
-                for idx, bbox in enumerate(bbox_list[frame_index]):
-                    if bbox[4] > 0.0:
-                        bboxes_in_frame.append({'bbox': bbox, 'id': idx})
-                person_results = bboxes_in_frame
-            if len(bboxes_in_frame) > 0:
-                pose_results = inference_topdown(
-                    model=self.pose_model,
-                    img=img_arr,
-                    bboxes=bboxes_in_frame,
-                    bbox_format='xyxy')
-                frame_kps_results = np.zeros(
-                    shape=(
-                        len(bbox_list[frame_index]),
-                        n_kps,
-                        3,
-                    ))
-                print(pose_results)
-                for idx, data_sample in enumerate(pose_results.pred_instances):
-                    id = person_dict['id']
-                    keypoints = person_dict['keypoints']
-                    frame_kps_results[id] = keypoints
-                frame_kps_results = []
-                frame_bbox_results = []
-            else:
-                frame_kps_results = []
-                frame_bbox_results = []
-            ret_kps_list += [frame_kps_results]
-            ret_bbox_list += [frame_bbox_results]
-        return ret_kps_list, ret_heatmap_list, ret_bbox_list
+            for frame_index in range(start_index, end_index):
+                bboxes_in_frame = bbox_list[frame_index]
+                img_arr = image_array[frame_index]
+                if len(bboxes_in_frame) > 0:
+                    pose_results = inference_topdown(
+                        model=self.pose_model,
+                        img=img_arr,
+                        bboxes=bboxes_in_frame,
+                        bbox_format='xyxy')
+
+                    frame_kps_results = []
+                    assert len(pose_results) == 1
+                    for data_sample in pose_results:
+                        pred = data_sample.pred_instances
+
+                        # NOTE: Visibility is interpreted as confidence
+                        frame_kps_results.append(np.hstack((np.squeeze(pred.keypoints), pred.keypoints_visible.T)))
+                else:
+                    frame_kps_results = []
+                    
+                ret_kps_list.append(frame_kps_results)
+
+        return ret_kps_list
 
     def infer_frames(
             self,
@@ -289,10 +277,9 @@ class MMposeTopDownEstimator:
                     continue
                 for h_idx in range(n_human):
                     if h_idx < len(kps2d_list[f_idx]):
-                        mask_arr[f_idx, h_idx, ...] = np.sign(
-                            np.array(kps2d_list[f_idx][h_idx])[:, -1])
-                        kps2d_arr[f_idx,
-                                  h_idx, :, :] = kps2d_list[f_idx][h_idx]
+                        # NOTE: Visibility threshold: 0.7
+                        mask_arr[f_idx, h_idx, ...] = (kps2d_list[f_idx][h_idx][:, -1] > 0.7).astype(np.float32)
+                        kps2d_arr[f_idx, h_idx, :, :] = kps2d_list[f_idx][h_idx]
                     else:
                         mask_arr[f_idx, h_idx, ...] = 0
             keypoints2d = Keypoints(
@@ -308,7 +295,7 @@ class MMposeTopDownEstimator:
 def __translate_data_source__(mmpose_dataset_name):
     if mmpose_dataset_name == 'TopDownSenseWholeBodyDataset':
         return 'sense_whole_body'
-    elif mmpose_dataset_name == 'TopDownCocoWholeBodyDataset':
+    elif mmpose_dataset_name == 'TopDownCocoWholeBodyDataset' or mmpose_dataset_name == 'CocoWholeBodyDataset':
         return 'coco_wholebody'
     else:
         raise NotImplementedError
