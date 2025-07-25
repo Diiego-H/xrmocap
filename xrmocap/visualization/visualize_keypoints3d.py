@@ -24,6 +24,7 @@ def visualize_keypoints3d_projected(
     plot_points: bool = True,
     plot_lines: bool = True,
     # background args
+    background_lst: Union[List[np.ndarray], None] = None,
     background_arr: Union[np.ndarray, None] = None,
     background_dir: Union[np.ndarray, None] = None,
     background_video: Union[np.ndarray, None] = None,
@@ -62,6 +63,8 @@ def visualize_keypoints3d_projected(
         plot_lines (bool, optional):
             Whether to plot lines according to keypoints'
             limbs. Defaults to True.
+        background_lst: (Union[List[np.ndarray], None], optional):
+            Background image list. Defaults to None.
         background_arr (Union[np.ndarray, None], optional):
             Background image array. Defaults to None.
         background_dir (Union[str, None], optional):
@@ -124,6 +127,7 @@ def visualize_keypoints3d_projected(
         return_array=return_array,
         plot_points=plot_points,
         plot_lines=plot_lines,
+        background_lst=background_lst,
         background_arr=background_arr,
         background_dir=background_dir,
         background_video=background_video,

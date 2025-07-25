@@ -30,6 +30,7 @@ def visualize_keypoints2d(
     plot_points: bool = True,
     plot_lines: bool = True,
     # background args
+    background_lst: Union[List[np.ndarray], None] = None,
     background_arr: Union[np.ndarray, None] = None,
     background_dir: Union[str, None] = None,
     background_video: Union[str, None] = None,
@@ -65,6 +66,8 @@ def visualize_keypoints2d(
         plot_lines (bool, optional):
             Whether to plot lines according to keypoints'
             limbs. Defaults to True.
+        background_lst (Union[List[np.ndarray], None], optional):
+            Background image list. Defaults to None.
         background_arr (Union[np.ndarray, None], optional):
             Background image array. Defaults to None.
         background_dir (Union[str, None], optional):
@@ -199,6 +202,7 @@ def visualize_keypoints2d(
         mframe_line_mask=mframe_line_mask,
         point_palette=point_palette,
         line_palette=line_palette,
+        background_lst=background_lst,
         background_arr=background_arr,
         background_dir=background_dir,
         background_video=background_video,
@@ -226,6 +230,7 @@ def plot_video(
     point_palette: Union[PointPalette, None] = None,
     line_palette: Union[LinePalette, None] = None,
     # background args
+    background_lst: Union[List[np.ndarray], None] = None,
     background_arr: Union[np.ndarray, None] = None,
     background_dir: Union[str, None] = None,
     background_video: Union[str, None] = None,
@@ -281,6 +286,8 @@ def plot_video(
             color and
             visibility are kept by point_palette.
             Defaults to None, do not plot lines.
+        background_lst (Union[List[np.ndarray], None], optional):
+            Background image list. Defaults to None.
         background_arr (Union[np.ndarray, None], optional):
             Background image array. Defaults to None.
         background_dir (Union[str, None], optional):
@@ -315,6 +322,7 @@ def plot_video(
         output_path=output_path, overwrite=overwrite, logger=logger)
     # check if only one background source
     _check_background_src(
+        background_lst=background_lst,
         background_arr=background_arr,
         background_dir=background_dir,
         background_video=background_video,
@@ -329,7 +337,7 @@ def plot_video(
         logger=logger)
     # check if data matches background
     data_to_check = [
-        mframe_point_data, mframe_line_data, background_arr, background_dir,
+        mframe_point_data, mframe_line_data, background_lst, background_arr, background_dir,
         background_video, background_img_list
     ]
     data_len = check_data_len(data_list=data_to_check, logger=logger)
@@ -360,15 +368,16 @@ def plot_video(
                            ' do not pass it.')
     for frame_idx in tqdm(range(0, data_len), disable=disable_tqdm):
         # prepare background array for this batch
-        if background_arr is not None:
+        if background_lst is not None:
+            background_sframe = background_lst[frame_idx]
+        elif background_arr is not None:
             background_sframe = background_arr[frame_idx, ...].copy()
         elif background_dir is not None:
             file_names_cache = file_names_cache \
                 if file_names_cache is not None \
                 else sorted(os.listdir(background_dir))
             file_name = file_names_cache[frame_idx]
-            background_sframe = cv2.imread(
-                os.path.join(background_dir, file_name))
+            background_sframe = cv2.imread(os.path.join(background_dir, file_name))
         elif background_video is not None:
             video_reader = video_reader \
                 if video_reader is not None \
@@ -427,14 +436,15 @@ def plot_video(
     return arr_to_return if return_array else None
 
 
-def _check_background_src(background_arr: Union[np.ndarray, None],
+def _check_background_src(background_lst: Union[List[np.ndarray], None],
+                          background_arr: Union[np.ndarray, None],
                           background_dir: Union[str, None],
                           background_video: Union[str, None],
                           background_img_list: Union[List[str], None],
                           height: Union[int, None], width: Union[int, None],
                           logger: logging.Logger) -> int:
     candidates = [
-        background_arr, background_dir, background_video, background_img_list
+        background_lst, background_arr, background_dir, background_video, background_img_list
     ]
     not_none_count = 0
     for candidate in candidates:
@@ -444,7 +454,7 @@ def _check_background_src(background_arr: Union[np.ndarray, None],
         not_none_count += 1
     if not_none_count != 1:
         logger.error('Please pass only one background source' +
-                     ' among background_arr, background_dir,' +
+                     ' among background_lst, background_arr, background_dir,' +
                      ' background_video and height+width.')
         raise ValueError
     return 0
