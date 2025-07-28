@@ -27,13 +27,14 @@ def visualize_smpl_data(
         smpl_data: Union[SMPLData, SMPLXData, List[Union[SMPLData,
                                                          SMPLXData]]],
         body_model: Union[SMPL, SMPLX, dict, List[Union[SMPL, SMPLX, dict]]],
-        cam_param: Union[FisheyeCameraParameter, PinholeCameraParameter],
+        camera: Union[FisheyeCameraParameter, PinholeCameraParameter],
         # output args
         output_path: str,
-        overwrite: bool = False,
+        overwrite: bool = True,
         batch_size: int = 1000,
         return_array: bool = False,
         # background args
+        background_lst: Union[List[np.ndarray], None] = None,
         background_arr: Union[np.ndarray, None] = None,
         background_dir: Union[np.ndarray, None] = None,
         background_video: Union[np.ndarray, None] = None,
@@ -54,7 +55,7 @@ def visualize_smpl_data(
             Body model by which we calculate meshes from parameters.
             Could be a SMPL(X) module, or a dict for building the module,
             or a list of them if multi-gender is needed.
-        cam_param (Union[FisheyeCameraParameter, PinholeCameraParameter]):
+        camera (Union[FisheyeCameraParameter, PinholeCameraParameter]):
             Camera from which we watch the smpl bodies.
         output_path (str):
             Path to the output mp4 video file or image directory.
@@ -69,6 +70,8 @@ def visualize_smpl_data(
             Whether to return the video array. If True,
             please make sure your RAM is enough for the video.
             Defaults to False, return None.
+        background_lst: (Union[List[np.ndarray], None], optional):
+            Background image list. Defaults to None.
         background_arr (Union[np.ndarray, None], optional):
             Background image array. Defaults to None.
         background_dir (Union[np.ndarray, None], optional):
@@ -138,9 +141,22 @@ def visualize_smpl_data(
             mperson_faces = new_faces
         else:
             mperson_faces = torch.cat((mperson_faces, new_faces), dim=0)
+
+    # Minimal Pytorch Rasterizer does not support FisheyeCameraParameter
+    if isinstance(camera, FisheyeCameraParameter):
+        camera = PinholeCameraParameter(
+            K=camera.intrinsic,
+            R=camera.extrinsic_r,
+            T=camera.extrinsic_t,
+            height=camera.height,
+            width=camera.width,
+            convention=camera.convention,
+            world2cam=camera.world2cam
+        )
+
     renderer = MPRNormRenderer(
         faces=mperson_faces,
-        camera_parameter=cam_param,
+        camera_parameter=camera,
         device=device,
         logger=logger)
     # check whether to write video or write images
@@ -148,7 +164,7 @@ def visualize_smpl_data(
         if check_path_suffix(output_path, '.mp4') else (False, True)
     if write_video:
         xrprimer_video_writer = VideoWriter(
-            output_path, [cam_param.height, cam_param.width])
+            output_path, [camera.height, camera.width])
 
     total_iter = math.ceil(data_len / batch_size)
     curr_iter = 0
@@ -178,7 +194,9 @@ def visualize_smpl_data(
                 mperson_verts = torch.cat((mperson_verts, sperson_verts),
                                           dim=1)
 
-        if background_arr is not None:
+        if background_lst is not None:
+            background_arr_batch = background_lst[start_idx:end_idx].copy()
+        elif background_arr is not None:
             background_arr_batch = background_arr[start_idx:end_idx].copy()
         elif background_dir is not None:
             file_names_cache = file_names_cache \
@@ -198,7 +216,7 @@ def visualize_smpl_data(
                 background_video, start=start_idx, end=end_idx)
         else:
             background_arr_batch = np.zeros(
-                (end_idx - start_idx, cam_param.height, cam_param.width, 3),
+                (end_idx - start_idx, camera.height, camera.width, 3),
                 dtype=np.uint8)
         batch_results = []
 
@@ -206,9 +224,6 @@ def visualize_smpl_data(
         for frame_idx in tqdm(range(0, iter_batch_len), disable=disable_tqdm):
             sframe_mperson_verts = mperson_verts[frame_idx]
             sframe_background = background_arr_batch[frame_idx]
-            for person_idx in range(n_person):
-                mask_value = smpl_data_list[person_idx].get_mask()[frame_idx]
-                sframe_mperson_verts[person_idx] *= mask_value
             if sframe_mperson_verts.square().sum() > 0:
                 img = renderer(
                     vertices=sframe_mperson_verts.reshape(-1, 3),
