@@ -2,6 +2,9 @@ from mmengine.registry import Registry
 
 from .betas_prior_handler import BetasPriorHandler
 from .body_pose_prior_handler import BodyPosePriorHandler
+from .global_orient_prior_handler import GlobalOrientPriorHandler
+from .hands_pose_prior_handler import HandsPosePriorHandler
+from .transl_prior_handler import TranslPriorHandler
 from .keypoint3d_limb_length_handler import (  # noqa:E501
     Keypoint3dLimbLenHandler, Keypoint3dLimbLenInput,
 )
@@ -27,6 +30,14 @@ REGISTRANT_HANDLERS.register_module(
     name='MultiviewKeypoint2dMSEInput', module=MultiviewKeypoint2dMSEInput)
 REGISTRANT_HANDLERS.register_module(
     name='MultiviewKeypoint2dMSEHandler', module=MultiviewKeypoint2dMSEHandler)
+
+# Custom handlers
+REGISTRANT_HANDLERS.register_module(
+    name='GlobalOrientPriorHandler', module=GlobalOrientPriorHandler)
+REGISTRANT_HANDLERS.register_module(
+    name='TranslPriorHandler', module=TranslPriorHandler)
+REGISTRANT_HANDLERS.register_module(
+    name='HandsPosePriorHandler', module=HandsPosePriorHandler)
 
 
 def build_handler(cfg):

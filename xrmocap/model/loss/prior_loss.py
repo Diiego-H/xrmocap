@@ -84,6 +84,69 @@ class ShapePriorLoss(torch.nn.Module):
         return shape_prior_loss
 
 
+class ShapeBoundLoss(torch.nn.Module):
+
+    def __init__(self,
+                 reduction: Literal['mean', 'sum', 'none'] = 'mean',
+                 loss_weight=1.0):
+        """Boundary loss for body shape parameters.
+
+        Args:
+            reduction (Literal['mean', 'sum', 'none'], optional):
+                The method that reduces the loss to a
+                scalar. Options are 'none', 'mean' and 'sum'.
+                Defaults to 'mean'.
+            loss_weight (float, optional):
+                The weight of the loss.
+                Defaults to 1.0.
+        """
+        super().__init__()
+        assert reduction in ('none', 'mean', 'sum')
+        self.reduction = reduction
+        self.loss_weight = loss_weight
+
+    def forward(
+        self,
+        betas: torch.Tensor,
+        loss_weight_override: float = None,
+        reduction_override: Literal['mean', 'sum',
+                                    'none'] = None) -> torch.Tensor:
+        """Forward function of loss.
+
+        Args:
+            betas (torch.Tensor):
+                The body shape parameters. In shape (batch_size, 10).
+            loss_weight_override (float, optional):
+                The weight of loss. If given, it will
+                override the original weight of loss.
+                Defaults to None.
+            reduction_override (Literal['mean', 'sum', 'none'], optional):
+                The reduction method. If given, it will
+                override the original reduction method of the loss.
+                Defaults to None.
+        Returns:
+            torch.Tensor: The calculated loss
+        """
+        assert reduction_override in (None, 'none', 'mean', 'sum')
+        reduction = reduction_override \
+            if reduction_override is not None \
+            else self.reduction
+        loss_weight = loss_weight_override\
+            if loss_weight_override is not None \
+            else self.loss_weight
+
+        # Add penalty for shape parameters outside [-4, 4]
+        shape_bound_loss = F.relu(-4 - betas) + F.relu(betas - 4)
+        shape_bound_loss = loss_weight * shape_bound_loss
+
+        if reduction == 'mean':
+            shape_bound_loss = shape_bound_loss.mean()
+        elif reduction == 'sum':
+            shape_bound_loss = shape_bound_loss.sum()
+
+        return shape_bound_loss
+
+
 class JointPriorLoss(torch.nn.Module):
 
     def __init__(self,
@@ -109,7 +172,7 @@ class JointPriorLoss(torch.nn.Module):
                 Whether to Use full set of joint constraints
                 (in standard joint angles). Defaults to False.
             smooth_spine (bool, optional):
-                Whether to ensurw smooth spine rotations. Defaults to False.
+                Whether to ensure smooth spine rotations. Defaults to False.
             smooth_spine_loss_weight (float, optional):
                 An additional weight factor multiplied on
                 smooth spine loss. Defaults to 1.0.
@@ -712,3 +775,274 @@ class PoseRegLoss(torch.nn.Module):
         elif reduction == 'sum':
             pose_prior_loss = pose_prior_loss.sum()
         return pose_prior_loss
+
+
+class SmoothOrientLoss(torch.nn.Module):
+
+    def __init__(self,
+                 reduction: Literal['mean', 'sum', 'none'] = 'mean',
+                 loss_weight: float = 1.0,
+                 degree: bool = False,
+                 loss_func: Literal['L1', 'L2'] = 'L1'):
+        """Smooth loss for global orientation.
+
+        Args:
+            reduction (Literal['mean', 'sum', 'none'], optional):
+                The method that reduces the loss to a
+                scalar. Options are 'none', 'mean' and 'sum'.
+                Defaults to 'mean'.
+            loss_weight (float, optional):
+                The weight of the loss. Defaults to 1.0.
+            degree (bool, optional):
+                The flag which represents whether the input
+                tensor is in degree or radian. Defaults to False.
+            loss_func (Literal['L1', 'L2'], optional):
+                Which method to be used on rotation difference.
+                Defaults to 'L1'.
+        """
+        super().__init__()
+        assert reduction in (None, 'none', 'mean', 'sum')
+        assert loss_func in ('L1', 'L2')
+        self.reduction = reduction
+        self.loss_weight = loss_weight
+        self.degree = degree
+        self.loss_func = loss_func
+
+    def forward(
+        self,
+        global_orient: torch.Tensor,
+        loss_weight_override: float = None,
+        reduction_override: Literal['mean', 'sum',
+                                    'none'] = None) -> torch.Tensor:
+        """Forward function of SmoothOrientLoss.
+
+        Args:
+            global_orient (torch.Tensor):
+                The global orientation.
+            loss_weight_override (float, optional):
+                The weight of loss used to
+                override the original weight of loss.
+                Defaults to None.
+            reduction_override (Literal['mean', 'sum', 'none'], optional)::
+                The reduction method used to
+                override the original reduction method of the loss.
+                Defaults to None.
+        Returns:
+            torch.Tensor: The calculated loss
+        """
+        assert reduction_override in (None, 'none', 'mean', 'sum')
+        # No smooth when there's only one frame
+        if global_orient.shape[0] <= 1:
+            return torch.zeros_like(global_orient[0, 0])
+
+        reduction = reduction_override \
+            if reduction_override is not None \
+            else self.reduction
+        loss_weight = loss_weight_override\
+            if loss_weight_override is not None \
+            else self.loss_weight
+
+        theta = global_orient.reshape(global_orient.shape[0], -1, 3)
+        if self.degree:
+            theta = torch.deg2rad(theta)
+        rot_6d = aa_to_rot6d(theta)
+        rot_6d_diff = rot_6d[1:] - rot_6d[:-1]
+
+        if self.loss_func == 'L2':
+            smooth_orient_loss = (rot_6d_diff**2).sum(dim=[1, 2])
+        elif self.loss_func == 'L1':
+            smooth_orient_loss = rot_6d_diff.abs().sum(dim=[1, 2])
+        else:
+            raise TypeError(f'{self.func} is not defined')
+
+        # add zero padding to retain original batch_size
+        smooth_orient_loss = torch.cat(
+            [torch.zeros_like(smooth_orient_loss)[:1], smooth_orient_loss])
+
+        if reduction == 'mean':
+            smooth_orient_loss = smooth_orient_loss.mean()
+        elif reduction == 'sum':
+            smooth_orient_loss = smooth_orient_loss.sum()
+
+        smooth_orient_loss *= loss_weight
+        return smooth_orient_loss
+
+
+class SmoothTranslLoss(torch.nn.Module):
+
+    def __init__(self,
+                 reduction: Literal['mean', 'sum', 'none'] = 'mean',
+                 loss_weight: float = 1.0,
+                 loss_func: Literal['L1', 'L2'] = 'L1'):
+        """Smooth loss for translation.
+
+        Args:
+            reduction (Literal['mean', 'sum', 'none'], optional):
+                The method that reduces the loss to a
+                scalar. Options are 'none', 'mean' and 'sum'.
+                Defaults to 'mean'.
+            loss_weight (float, optional):
+                The weight of the loss. Defaults to 1.0.
+            loss_func (Literal['L1', 'L2'], optional):
+                Which method to be used on translation difference.
+                Defaults to 'L1'.
+        """
+        super().__init__()
+        assert reduction in (None, 'none', 'mean', 'sum')
+        assert loss_func in ('L1', 'L2')
+        self.reduction = reduction
+        self.loss_weight = loss_weight
+        self.loss_func = loss_func
+
+    def forward(
+        self,
+        transl: torch.Tensor,
+        loss_weight_override: float = None,
+        reduction_override: Literal['mean', 'sum',
+                                    'none'] = None) -> torch.Tensor:
+        """Forward function of SmoothTranslLoss.
+
+        Args:
+            transl (torch.Tensor):
+                The translation.
+            loss_weight_override (float, optional):
+                The weight of loss used to
+                override the original weight of loss.
+                Defaults to None.
+            reduction_override (Literal['mean', 'sum', 'none'], optional)::
+                The reduction method used to
+                override the original reduction method of the loss.
+                Defaults to None.
+        Returns:
+            torch.Tensor: The calculated loss
+        """
+        assert reduction_override in (None, 'none', 'mean', 'sum')
+        # No smooth when there's only one frame
+        if transl.shape[0] <= 1:
+            return torch.zeros_like(transl[0, 0])
+
+        reduction = reduction_override \
+            if reduction_override is not None \
+            else self.reduction
+        loss_weight = loss_weight_override\
+            if loss_weight_override is not None \
+            else self.loss_weight
+
+        transl_diff = transl[1:] - transl[:-1]
+
+        if self.loss_func == 'L2':
+            smooth_transl_loss = (transl_diff**2).sum(dim=[1])
+        elif self.loss_func == 'L1':
+            smooth_transl_loss = transl_diff.abs().sum(dim=[1])
+        else:
+            raise TypeError(f'{self.func} is not defined')
+
+        # add zero padding to retain original batch_size
+        smooth_transl_loss = torch.cat(
+            [torch.zeros_like(smooth_transl_loss)[:1], smooth_transl_loss])
+
+        if reduction == 'mean':
+            smooth_transl_loss = smooth_transl_loss.mean()
+        elif reduction == 'sum':
+            smooth_transl_loss = smooth_transl_loss.sum()
+
+        smooth_transl_loss *= loss_weight
+        return smooth_transl_loss
+
+
+class SmoothHandsLoss(torch.nn.Module):
+
+    def __init__(self,
+                 reduction: Literal['mean', 'sum', 'none'] = 'mean',
+                 loss_weight: float = 1.0,
+                 degree: bool = False,
+                 loss_func: Literal['L1', 'L2'] = 'L1'):
+        """Smooth loss for hands pose.
+
+        Args:
+            reduction (Literal['mean', 'sum', 'none'], optional):
+                The method that reduces the loss to a
+                scalar. Options are 'none', 'mean' and 'sum'.
+                Defaults to 'mean'.
+            loss_weight (float, optional):
+                The weight of the loss. Defaults to 1.0.
+            degree (bool, optional):
+                The flag which represents whether the input
+                tensor is in degree or radian. Defaults to False.
+            loss_func (Literal['L1', 'L2'], optional):
+                Which method to be used on rotation difference.
+                Defaults to 'L1'.
+        """
+        super().__init__()
+        assert reduction in (None, 'none', 'mean', 'sum')
+        assert loss_func in ('L1', 'L2')
+        self.reduction = reduction
+        self.loss_weight = loss_weight
+        self.degree = degree
+        self.loss_func = loss_func
+
+    def forward(
+        self,
+        left_hand_pose: torch.Tensor,
+        right_hand_pose: torch.Tensor,
+        loss_weight_override: float = None,
+        reduction_override: Literal['mean', 'sum',
+                                    'none'] = None) -> torch.Tensor:
+        """Forward function of SmoothOrientLoss.
+
+        Args:
+            left_hand_pose (torch.Tensor):
+                The left hand pose parameters.
+            right_hand_pose (torch.Tensor):
+                The right hand pose parameters.
+            loss_weight_override (float, optional):
+                The weight of loss used to
+                override the original weight of loss.
+                Defaults to None.
+            reduction_override (Literal['mean', 'sum', 'none'], optional)::
+                The reduction method used to
+                override the original reduction method of the loss.
+                Defaults to None.
+        Returns:
+            torch.Tensor: The calculated loss
+        """
+        assert reduction_override in (None, 'none', 'mean', 'sum')
+
+        # Concatenate left and right hand poses
+        hand_pose = torch.cat([left_hand_pose, right_hand_pose], dim=-1)
+
+        # No smooth when there's only one frame
+        if hand_pose.shape[0] <= 1:
+            return torch.zeros_like(hand_pose[0, 0])
+
+        reduction = reduction_override \
+            if reduction_override is not None \
+            else self.reduction
+        loss_weight = loss_weight_override\
+            if loss_weight_override is not None \
+            else self.loss_weight
+
+        theta = hand_pose.reshape(hand_pose.shape[0], -1, 3)
+        if self.degree:
+            theta = torch.deg2rad(theta)
+        rot_6d = aa_to_rot6d(theta)
+        rot_6d_diff = rot_6d[1:] - rot_6d[:-1]
+
+        if self.loss_func == 'L2':
+            smooth_hands_loss = (rot_6d_diff**2).sum(dim=[1, 2])
+        elif self.loss_func == 'L1':
+            smooth_hands_loss = rot_6d_diff.abs().sum(dim=[1, 2])
+        else:
+            raise TypeError(f'{self.func} is not defined')
+
+        # add zero padding to retain original batch_size
+        smooth_hands_loss = torch.cat(
+            [torch.zeros_like(smooth_hands_loss)[:1], smooth_hands_loss])
+
+        if reduction == 'mean':
+            smooth_hands_loss = smooth_hands_loss.mean()
+        elif reduction == 'sum':
+            smooth_hands_loss = smooth_hands_loss.sum()
+
+        smooth_hands_loss *= loss_weight
+        return smooth_hands_loss

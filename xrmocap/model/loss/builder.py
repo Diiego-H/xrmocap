@@ -5,7 +5,7 @@ from .kp_loss import SetCriterion
 from .mse_loss import KeypointMSELoss
 from .prior_loss import (
     JointPriorLoss, LimbLengthLoss, MaxMixturePriorLoss, PoseRegLoss,
-    ShapePriorLoss, SmoothJointLoss,
+    ShapePriorLoss, SmoothJointLoss, SmoothOrientLoss, SmoothTranslLoss, SmoothHandsLoss, ShapeBoundLoss
 )
 
 # yapf: enable
@@ -20,6 +20,12 @@ LOSSES.register_module(name='MaxMixturePriorLoss', module=MaxMixturePriorLoss)
 LOSSES.register_module(name='LimbLengthLoss', module=LimbLengthLoss)
 LOSSES.register_module(name='PoseRegLoss', module=PoseRegLoss)
 LOSSES.register_module(name='SetCriterion', module=SetCriterion)
+
+# Custom losses
+LOSSES.register_module(name='ShapeBoundLoss', module=ShapeBoundLoss)
+LOSSES.register_module(name='SmoothOrientLoss', module=SmoothOrientLoss)
+LOSSES.register_module(name='SmoothTranslLoss', module=SmoothTranslLoss)
+LOSSES.register_module(name='SmoothHandsLoss', module=SmoothHandsLoss)
 
 
 def build_loss(cfg):
