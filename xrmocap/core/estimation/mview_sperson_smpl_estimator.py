@@ -16,15 +16,7 @@ from xrmocap.human_perception.builder import (
 from xrmocap.io.image import load_multiview_images
 from xrmocap.model.registrant.builder import SMPLify, build_registrant
 from xrmocap.model.registrant.handler.builder import build_handler
-from xrmocap.ops.triangulation.builder import (
-    BaseTriangulator, build_triangulator,
-)
-from xrmocap.ops.triangulation.point_selection.builder import (
-    BaseSelector, CameraErrorSelector, build_point_selector,
-)
-from xrmocap.transform.keypoints3d.optim.builder import (
-    BaseOptimizer, build_keypoints3d_optimizer,
-)
+
 from .base_estimator import BaseEstimator
 
 from mmdet.utils import register_all_modules as register_det_modules
@@ -40,13 +32,7 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
                  work_dir: str,
                  bbox_detector: Union[dict, MMdetDetector],
                  kps2d_estimator: Union[dict, MMposeTopDownEstimator],
-                 triangulator: Union[dict, BaseTriangulator],
                  smplify: Union[dict, SMPLify],
-                 cam_pre_selector: Union[dict, BaseSelector, None] = None,
-                 cam_selector: Union[dict, CameraErrorSelector, None] = None,
-                 final_selectors: List[Union[dict, BaseSelector, None]] = None,
-                 kps3d_optimizers: Union[List[Union[BaseOptimizer, dict]],
-                                         None] = None,
                  load_batch_size: int = 500,
                  verbose: bool = True,
                  logger: Union[None, str, logging.Logger] = None) -> None:
@@ -61,28 +47,8 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
                 A human bbox_detector or its config.
             kps2d_estimator (Union[dict, MMposeTopDownEstimator]):
                 A top-down kps2d estimator or its config.
-            triangulator (Union[dict, BaseTriangulator]):
-                A triangulator or its config.
             smplify (Union[dict, SMPLify]):
                 A SMPLify instance or its config.
-            cam_pre_selector (Union[dict, BaseSelector, None], optional):
-                A selector before selecting cameras. If it's given,
-                points for camera selection will be filtered.
-                Defaults to None.
-            cam_selector (Union[dict, CameraErrorSelector, None], optional):
-                A camera selector or its config. If it's given, cameras
-                will be selected before triangulation.
-                Defaults to None.
-            final_selectors (List[Union[dict, BaseSelector, None]], optional):
-                A list of selectors or their configs. If given, kps2d will be
-                selected by the cascaded final selectors before triangulation.
-                Defaults to None.
-            kps3d_optimizers (Union[
-                    List[Union[BaseOptimizer, dict]], None], optional):
-                A list of keypoints3d optimizers or their configs. If given,
-                keypoints3d will be
-                optimized by the cascaded final optimizers after triangulation.
-                Defaults to None.
             load_batch_size (int, optional):
                 How many frames are loaded at the same time. Defaults to 500.
             verbose (bool, optional):
@@ -109,12 +75,6 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
         else:
             self.kps2d_estimator = kps2d_estimator
 
-        if isinstance(triangulator, dict):
-            triangulator['logger'] = logger
-            self.triangulator = build_triangulator(triangulator)
-        else:
-            self.triangulator = triangulator
-
         if isinstance(smplify, dict):
             smplify['logger'] = logger
             if smplify['type'].lower() == 'smplify':
@@ -128,40 +88,6 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
             self.smplify = build_registrant(smplify)
         else:
             self.smplify = smplify
-
-        if isinstance(cam_pre_selector, dict):
-            cam_pre_selector['logger'] = logger
-            self.cam_pre_selector = build_point_selector(cam_pre_selector)
-        else:
-            self.cam_pre_selector = cam_pre_selector
-
-        if isinstance(cam_selector, dict):
-            cam_selector['logger'] = logger
-            cam_selector['triangulator']['camera_parameters'] = \
-                self.triangulator.camera_parameters
-            self.cam_selector = build_point_selector(cam_selector)
-        else:
-            self.cam_selector = cam_selector
-
-        if final_selectors is None:
-            self.final_selectors = None
-        else:
-            self.final_selectors = []
-            for selector in final_selectors:
-                if isinstance(selector, dict):
-                    selector['logger'] = logger
-                    selector = build_point_selector(selector)
-                self.final_selectors.append(selector)
-
-        if kps3d_optimizers is None:
-            self.kps3d_optimizers = None
-        else:
-            self.kps3d_optimizers = []
-            for kps3d_optim in kps3d_optimizers:
-                if isinstance(kps3d_optim, dict):
-                    kps3d_optim['logger'] = logger
-                    kps3d_optim = build_keypoints3d_optimizer(kps3d_optim)
-                self.kps3d_optimizers.append(kps3d_optim)
 
     def run(
         self,
@@ -238,6 +164,7 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
         Returns:
             Keypoints: A keypoints3d Keypoints instance.
         """
+        # TODO: BUNDLE ADJUSTMENT FROM MEYSAM
         self.logger.info('Estimating keypoints3d.')
         # prepare input np.ndarray
         kps_arr_list = []
@@ -376,42 +303,3 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
             smpl_data['vertices'] = registrant_output['vertices']
 
         return smpl_data
-
-    def select_camera(self, cam_param: List[FisheyeCameraParameter],
-                      points: np.ndarray,
-                      points_mask: np.ndarray) -> List[int]:
-        """Use cam_pre_selector to filter bad points, use reprojection error of
-        the good points to select good cameras.
-
-        Args:
-            cam_param (List[FisheyeCameraParameter]):
-                A list of FisheyeCameraParameter instances.
-            points (np.ndarray):
-                Multiview points2d, in shape [n_view, n_frame, n_kps, 3].
-                Point scores at the last dim.
-            points_mask (np.ndarray):
-                Multiview points2d mask,
-                in shape [n_view, n_frame, n_kps, 1].
-
-        Returns:
-            List[int]: A list of camera indexes.
-        """
-        if self.cam_selector is not None:
-            self.logger.info('Selecting cameras.')
-            if self.cam_pre_selector is not None:
-                self.logger.info('Using pre-selector for camera selection.')
-                pre_mask = self.cam_pre_selector.get_selection_mask(
-                    points=points, init_points_mask=points_mask)
-            else:
-                pre_mask = points_mask.copy()
-            self.triangulator.set_cameras(cam_param)
-            self.cam_selector.triangulator = self.triangulator
-            selected_camera_indexes = self.cam_selector.get_camera_indexes(
-                points=points, init_points_mask=pre_mask)
-            self.logger.info(f'Selected cameras: {selected_camera_indexes}')
-        else:
-            self.logger.warning(
-                'The estimator api instance has no cam_selector,' +
-                ' all the cameras will be returned.')
-            selected_camera_indexes = [idx for idx in range(len(cam_param))]
-        return selected_camera_indexes
