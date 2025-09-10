@@ -27,6 +27,11 @@ from ultralytics import YOLO
 # yapf: enable
 
 
+# TODO: Refactor this
+import sys
+sys.path.append("/code/src/ba_joints")
+from my_bundle_adjustment import process as ba_process
+
 class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
     """Api for estimating smpl in a multi-view single-person scene."""
 
@@ -168,14 +173,18 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
                 mask = keypoints2d["mask"]
                 kpts = keypoints2d["keypoints"]
 
-                # Face detection
-                results = self.face_model(view_img_arr, conf=faces_threshold)
-                for i, r in enumerate(results):
-                    if len(r.boxes) > 1:
-                        print(f"WARNING: More than one face detected in view {view_index} frame {i}. Confidences: {[box.conf[0] for box in r.boxes]}")
-                    elif len(r.boxes) == 0:
-                        # Mask face keypoints for this frame
-                        mask[i, :, kpts_idxs["face"]] = 0
+                # Face detection (in batches to prevent GPU memory error)
+                batch_size = 64
+                for i in range(0, len(view_img_arr), batch_size):
+                    batch = view_img_arr[i:i+batch_size]
+                    results = self.face_model(batch, conf=faces_threshold, verbose=False)
+
+                    for j, r in enumerate(results):
+                        if len(r.boxes) > 1:
+                            print(f"WARNING: More than one face detected in view {view_index} frame {i+j}. Confidences: {[box.conf[0] for box in r.boxes]}")
+                        elif len(r.boxes) == 0:
+                            # Mask face keypoints for this frame
+                            mask[i+j, :, kpts_idxs["face"]] = 0
 
                 # Hands thresholding
                 mask[:, :, kpts_idxs["hands"]] *= (keypoints2d["keypoints"][:, :, kpts_idxs["hands"], -1] > hands_threshold).astype(np.uint8)
@@ -183,13 +192,12 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
             ret_list.append(keypoints2d)
         return ret_list
 
-    def estimate_keypoints3d(self, cam_param: List[FisheyeCameraParameter],
-                             keypoints2d_list: List[Keypoints]) -> Keypoints:
+    def estimate_keypoints3d(self, seq_data: dict, keypoints2d_list: List[Keypoints]) -> Keypoints:
         """Estimate keypoints3d by triangulation and optimizers if exists.
 
         Args:
-            cam_param (List[FisheyeCameraParameter]):
-                A list of FisheyeCameraParameter instances.
+            seq_data (dict):
+                Data for bundle adjustment.
             keypoints2d_list (List[Keypoints]):
                 A list of Keypoints2d, in same mask and convention,
                 and the time axis are aligned.
@@ -197,11 +205,9 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
         Returns:
             Keypoints: A keypoints3d Keypoints instance.
         """
-        # TODO: BUNDLE ADJUSTMENT FROM MEYSAM
         self.logger.info('Estimating keypoints3d.')
-        # prepare input np.ndarray
-        kps_arr_list = []
-        mask_list = []
+
+        # Prepare input np.ndarray
         default_keypoints2d = None
         for keypoints2d in keypoints2d_list:
             if keypoints2d is not None:
@@ -214,51 +220,41 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
         if default_keypoints2d is None:
             self.logger.error('No one has been detected in any view.')
             raise AttributeError
-        for keypoints2d in keypoints2d_list:
-            if keypoints2d is None:
-                keypoints2d = default_keypoints2d
-            if keypoints2d.dtype != 'numpy':
-                keypoints2d = keypoints2d.to_numpy()
-            kps_arr_list.append(keypoints2d.get_keypoints()[:, 0, ...])
-            mask_list.append(keypoints2d.get_mask()[:, 0, ...])
-        mview_kps2d_arr = np.asarray(kps_arr_list)
-        mview_mask = np.asarray(mask_list)
-        mview_mask = np.expand_dims(mview_mask, -1)
-        # select camera
-        cam_indexes = self.select_camera(cam_param, mview_kps2d_arr, mview_mask)
-        self.triangulator.set_cameras(cam_param)
-        selected_triangulator = self.triangulator[cam_indexes]
-        mview_kps2d_arr = mview_kps2d_arr[np.asarray(cam_indexes), ...]
-        triangulate_mask = mview_mask[np.asarray(cam_indexes), ...]
-        # cascade point selectors
-        self.logger.info('Selecting points.')
-        if self.final_selectors is not None:
-            for selector in self.final_selectors:
-                triangulate_mask = selector.get_selection_mask(
-                    points=mview_kps2d_arr, init_points_mask=triangulate_mask)
-        kps3d_arr = selected_triangulator.triangulate(
-            points=mview_kps2d_arr, points_mask=triangulate_mask)
-        kps3d_arr = np.concatenate(
-            (kps3d_arr, np.ones_like(kps3d_arr[..., 0:1])), axis=-1)
-        kps3d_arr = np.expand_dims(kps3d_arr, axis=1)
-        kps3d_mask = np.sum(mview_mask, axis=(0, 1), keepdims=False)
-        kps3d_mask = np.sign(np.abs(kps3d_mask))
-        if kps3d_mask.shape[-1] == 1:
-            kps3d_mask = kps3d_mask[..., 0]
+        for view_keypoints2d in keypoints2d_list:
+            if view_keypoints2d is None:
+                view_keypoints2d = default_keypoints2d
+            if view_keypoints2d.dtype != 'numpy':
+                view_keypoints2d = view_keypoints2d.to_numpy()
+            
+        # For each frame, perform bundle adjustment
+        assert len(default_keypoints2d["keypoints"]) == 300, f"Not 300 frames: {len(default_keypoints2d['keypoints'])}"
+        for i in range(len(default_keypoints2d["keypoints"])):
+            # Obtain landmarks
+            landmarks = {}
+            for view, detection in zip(seq_data["views"], keypoints2d_list):
+                camera_data = {}
+
+                valid_ids = np.where(detection["mask"][i,0,:] == 1)[0]
+                camera_data["ids"] = valid_ids.tolist()
+                camera_data["landmarks"] = detection["keypoints"][i,0,valid_ids,:2].tolist()
+
+                landmarks[view] = camera_data
+
+            # Bundle adjustment
+            ba_points = ba_process(seq_data["ba_config"], seq_data["views"]. seq_data["intrinsics"], seq_data["extrinsics"], landmarks)
+
+            # TODO: ACCOUNT FOR THE UNITS (mm)
+
+        # TODO: From here, convert to kps3d_arr, kps3d_mask
+        # EXPORT 3D KPTS, GENERATE A VISUALIZATION OF THE RESULT
+
+
         keypoints3d = Keypoints(
             dtype='numpy',
             kps=kps3d_arr,
             mask=kps3d_mask,
             convention=default_keypoints2d.get_convention())
-        optim_kwargs = dict(
-            mview_kps2d=np.expand_dims(mview_kps2d_arr, axis=2),
-            mview_kps2d_mask=np.expand_dims(triangulate_mask, axis=2))
-        if self.kps3d_optimizers is not None:
-            for optimizer in self.kps3d_optimizers:
-                if hasattr(optimizer, 'triangulator'):
-                    optimizer.triangulator = selected_triangulator
-                keypoints3d = optimizer.optimize_keypoints3d(
-                    keypoints3d, **optim_kwargs)
+
         return keypoints3d
 
     def estimate_smpl(self,
