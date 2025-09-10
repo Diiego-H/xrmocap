@@ -22,6 +22,8 @@ from .base_estimator import BaseEstimator
 from mmdet.utils import register_all_modules as register_det_modules
 from mmpose.utils import register_all_modules as register_pose_modules
 
+from ultralytics import YOLO
+
 # yapf: enable
 
 
@@ -92,7 +94,7 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
     def run(
         self,
         cam_param: List[FisheyeCameraParameter],
-        img_arr: Union[List, np.ndarray],
+        img_arr: List[List[np.ndarray]],
         init_smpl_data: Union[None, SMPLData] = None,
     ) -> Tuple[List[Keypoints], Keypoints, SMPLData]:
         """Run multi-view single-person SMPL estimator.
@@ -100,8 +102,8 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
         Args:
             cam_param (List[FisheyeCameraParameter]):
                 A list of FisheyeCameraParameter instances.
-            img_arr (Union[List, np.ndarray]):
-                A list (or array) of multi-view images, in shape [n_view, n_frame, h, w, c].
+            img_arr (List[List[np.ndarray]]):
+                A list of multi-view images [H, W, C] in shape [n_view, n_frame].
 
         Returns:
             Tuple[List[Keypoints], Keypoints, SMPLData]:
@@ -115,12 +117,24 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
             keypoints3d=keypoints3d, init_smpl_data=init_smpl_data)
         return keypoints2d_list, keypoints3d, smpl_data
 
-    def estimate_keypoints2d(self, img_arr: Union[List, np.ndarray]) -> List[Keypoints]:
+    # https://github.com/openxrlab/xrprimer/blob/main/python/xrprimer/transform/convention/keypoints_convention/coco_wholebody.py
+    COCO_WHOLEBODY_KEYPOINTS = {
+        "face": np.array(list(range(0,5)) + list(range(23,91))),
+        "body": np.arange(5, 23),
+        "hands": np.arange(91, 133)
+    }
+
+    # https://github.com/lindevs/yolov8-face/tree/master
+    face_model = YOLO("/data/weight/yolov8x-face-lindevs.pt")
+    face_model.to("cuda:0")
+    face_model.eval()
+
+    def estimate_keypoints2d(self, img_arr: List[List[np.ndarray]], faces_threshold: float = 0.7, hands_threshold: float = 0.995) -> List[Keypoints]:
         """Estimate keypoints2d in a top-down way.
 
         Args:
-            img_arr (Union[List, np.ndarray]):
-                A list (or array) of multi-view images, in shape [n_view, n_frame, h, w, c].
+            img_arr (List[List[np.ndarray]]):
+                A list of multi-view images [H, W, C] in shape [n_view, n_frame].
 
         Returns:
             List[Keypoints]:
@@ -128,6 +142,7 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
         """
         self.logger.info('Estimating keypoints2d.')
         ret_list = []
+        kpts_idxs = self.COCO_WHOLEBODY_KEYPOINTS
         for view_index in range(len(img_arr)):
             view_img_arr = img_arr[view_index]
             register_det_modules()
@@ -147,6 +162,24 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
                 kps2d_list = [[]]
             keypoints2d = self.kps2d_estimator.get_keypoints_from_result(
                 kps2d_list)
+
+            # Post-detection filtering
+            if keypoints2d is not None:
+                mask = keypoints2d["mask"]
+                kpts = keypoints2d["keypoints"]
+
+                # Face detection
+                results = self.face_model(view_img_arr, conf=faces_threshold)
+                for i, r in enumerate(results):
+                    if len(r.boxes) > 1:
+                        print(f"WARNING: More than one face detected in view {view_index} frame {i}. Confidences: {[box.conf[0] for box in r.boxes]}")
+                    elif len(r.boxes) == 0:
+                        # Mask face keypoints for this frame
+                        mask[i, :, kpts_idxs["face"]] = 0
+
+                # Hands thresholding
+                mask[:, :, kpts_idxs["hands"]] *= (keypoints2d["keypoints"][:, :, kpts_idxs["hands"], -1] > hands_threshold).astype(np.uint8)
+
             ret_list.append(keypoints2d)
         return ret_list
 
