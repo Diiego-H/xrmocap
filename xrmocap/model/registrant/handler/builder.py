@@ -1,4 +1,4 @@
-from mmcv.utils import Registry
+from mmengine.registry import Registry
 
 from .betas_prior_handler import BetasPriorHandler
 from .body_pose_prior_handler import BodyPosePriorHandler
@@ -9,6 +9,7 @@ from .keypoint3d_mse_handler import Keypoint3dMSEHandler, Keypoint3dMSEInput
 from .multiview_keypoint2d_mse_handler import (  # noqa:E501
     MultiviewKeypoint2dMSEHandler, MultiviewKeypoint2dMSEInput,
 )
+from .chamfer_distance_handler import ChamferDistanceHandler, ChamferDistanceInput
 
 REGISTRANT_HANDLERS = Registry('registrant_handler')
 REGISTRANT_HANDLERS.register_module(
@@ -27,7 +28,10 @@ REGISTRANT_HANDLERS.register_module(
     name='MultiviewKeypoint2dMSEInput', module=MultiviewKeypoint2dMSEInput)
 REGISTRANT_HANDLERS.register_module(
     name='MultiviewKeypoint2dMSEHandler', module=MultiviewKeypoint2dMSEHandler)
-
+REGISTRANT_HANDLERS.register_module(
+    name='ChamferDistanceInput', module=ChamferDistanceInput)
+REGISTRANT_HANDLERS.register_module(
+    name='ChamferDistanceHandler', module=ChamferDistanceHandler)
 
 def build_handler(cfg):
     """Build a handler for registrant."""

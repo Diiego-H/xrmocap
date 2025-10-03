@@ -157,11 +157,14 @@ class Keypoint3dLimbLenHandler(BaseHandler):
             dst=self.loss.convention)
         batch_size = related_input.get_batch_size()
         joint_mask = joint_mask.reshape(1, -1).expand(batch_size, -1)
+
+        # First frame should not be used because of poor lighting
+        # TODO: REMOVE
         target_keypoints3d, target_keypoints3d_conf = convert_kps_mm(
             keypoints=target_keypoints3d,
             src=target_keypoints_convention,
             dst=self.loss.convention,
-            mask=target_keypoints3d_conf[0])
+            mask=target_keypoints3d_conf[20])
         target_keypoints3d_conf = target_keypoints3d_conf.reshape(
             1, -1).expand(batch_size, -1)
         limb_len_loss = self.loss(
