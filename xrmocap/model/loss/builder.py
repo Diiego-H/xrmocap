@@ -1,5 +1,5 @@
 # yapf: disable
-from mmcv.utils import Registry
+from mmengine.registry import Registry
 
 from .kp_loss import SetCriterion
 from .mse_loss import KeypointMSELoss
@@ -7,6 +7,7 @@ from .prior_loss import (
     JointPriorLoss, LimbLengthLoss, MaxMixturePriorLoss, PoseRegLoss,
     ShapePriorLoss, SmoothJointLoss,
 )
+from .chamfer_distance_loss import ChamferDistanceLoss
 
 # yapf: enable
 
@@ -20,6 +21,7 @@ LOSSES.register_module(name='MaxMixturePriorLoss', module=MaxMixturePriorLoss)
 LOSSES.register_module(name='LimbLengthLoss', module=LimbLengthLoss)
 LOSSES.register_module(name='PoseRegLoss', module=PoseRegLoss)
 LOSSES.register_module(name='SetCriterion', module=SetCriterion)
+LOSSES.register_module(name='ChamferDistanceLoss', module=ChamferDistanceLoss)
 
 
 def build_loss(cfg):

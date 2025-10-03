@@ -1,4 +1,4 @@
-import mmcv
+import mmengine
 import os
 import os.path as osp
 import pickle
@@ -7,7 +7,7 @@ import tempfile
 import time
 import torch
 import torch.distributed as dist
-from mmcv.runner import get_dist_info
+from mmengine.dist import get_dist_info
 from xrprimer.utils.log_utils import get_logger
 
 
@@ -102,9 +102,9 @@ def collect_results(result_part, size, tmpdir=None):
         dist.broadcast(dir_tensor, 0)
         tmpdir = dir_tensor.cpu().numpy().tobytes().decode().rstrip()
     else:
-        mmcv.mkdir_or_exist(tmpdir)
+        mmengine.mkdir_or_exist(tmpdir)
     # dump the part result to the dir
-    mmcv.dump(result_part, osp.join(tmpdir, f'part_{rank}.pkl'))
+    mmengine.dump(result_part, osp.join(tmpdir, f'part_{rank}.pkl'))
     dist.barrier()
     # collect all parts
     if rank != 0:
@@ -114,7 +114,7 @@ def collect_results(result_part, size, tmpdir=None):
         part_list = []
         for i in range(world_size):
             part_file = osp.join(tmpdir, f'part_{i}.pkl')
-            part_list.append(mmcv.load(part_file))
+            part_list.append(mmengine.load(part_file))
         # sort the results
         ordered_results = []
         for res in zip(*part_list):

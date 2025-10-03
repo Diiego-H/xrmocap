@@ -1,4 +1,4 @@
-from mmcv.runner.hooks import Hook
+from mmengine.hooks import Hook
 from typing import List, TypeVar
 
 from xrmocap.model.registrant.handler.base_handler import BaseInput
