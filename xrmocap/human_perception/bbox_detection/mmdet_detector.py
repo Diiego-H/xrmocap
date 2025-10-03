@@ -52,16 +52,14 @@ class MMdetDetector:
         self.batch_size = batch_size
 
     def infer_array(self,
-                    image_array: Union[np.ndarray, list],
+                    image_array: np.ndarray,
                     disable_tqdm: bool = False,
                     multi_person: bool = False) -> list:
         """Infer frames already in memory(ndarray type).
 
         Args:
-            image_array (Union[np.ndarray, list]):
-                BGR image ndarray in shape [n_frame, height, width, 3],
-                or a list of image ndarrays in shape [height, width, 3] while
-                len(list) == n_frame.
+            image_array (np.ndarray):
+                BGR image ndarray in shape [n_frame, height, width, 3].
             disable_tqdm (bool, optional):
                 Whether to disable the entire progressbar wrapper.
                 Defaults to False.
@@ -79,34 +77,17 @@ class MMdetDetector:
         ret_list = []
         bbox_results = []
         n_frame = len(image_array)
-        for start_index in tqdm(
-                range(0, n_frame, self.batch_size), disable=disable_tqdm):
+        for start_index in tqdm(range(0, n_frame, self.batch_size), disable=disable_tqdm, leave=False):
             end_index = min(n_frame, start_index + self.batch_size)
             img_batch = image_array[start_index:end_index]
-            # mmdet 2.16.0 cannot accept batch in ndarray, only list
-            if isinstance(img_batch, np.ndarray):
-                list_batch = []
-                for _, img in enumerate(img_batch):
-                    list_batch.append(img)
-                img_batch = list_batch
             mmdet_results = inference_detector(self.det_model, img_batch)
-            additional_ret = True
             for frame_result in mmdet_results:
-                if len(frame_result) != 2:
-                    additional_ret = False
-                    break
-                for bbox_result in frame_result:
-                    if isinstance(bbox_result, np.ndarray) and \
-                            bbox_result.shape == (0, 5):
-                        additional_ret = False
-                        break
-                if not additional_ret:
-                    break
-            # For models like HTC
-            if additional_ret:
-                bbox_results += [i[0] for i in mmdet_results]
-            else:
-                bbox_results += mmdet_results
+                prediction = frame_result.pred_instances
+                bbox_results.append({
+                    "bboxes": prediction.bboxes.cpu().numpy(),
+                    "scores": prediction.scores.cpu().numpy(),
+                    "labels": prediction.labels.cpu().numpy()
+                })
         ret_list = process_mmdet_results(
             bbox_results, multi_person=multi_person)
         return ret_list
@@ -198,8 +179,8 @@ def process_mmdet_results(mmdet_results: list,
         mmdet_results (list):
             Result of mmdet.apis.inference_detector
             when the input is a batch.
-            Shape of the nested lists is
-            (n_frame, n_category, n_human, 5).
+            List of dictionaries with keys
+            "bboxes", "scores" and "labels".
         cat_id (int, optional):
             Category ID. This function will only select
             the selected category, and drop the others.
@@ -221,11 +202,14 @@ def process_mmdet_results(mmdet_results: list,
     ret_list = []
     only_max_arg = not multi_person
     for _, frame_results in enumerate(mmdet_results):
-        cat_bboxes = frame_results[cat_id]
-        sorted_bbox = qsort_bbox_list(cat_bboxes, only_max_arg)
+        # Filter bboxes for selected category
+        cat_mask = frame_results["labels"] == cat_id
+        bboxes = frame_results["bboxes"][cat_mask]
 
-        if only_max_arg:
-            ret_list.append(sorted_bbox[0:1])
+        if len(bboxes) > 0 and only_max_arg:
+            # Append bbox with maximum score
+            scores = frame_results["scores"][cat_mask]
+            ret_list.append([bboxes[np.argmax(scores)]])
         else:
-            ret_list.append(sorted_bbox)
+            ret_list.append(bboxes)
     return ret_list

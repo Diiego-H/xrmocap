@@ -8,28 +8,14 @@ from xrprimer.transform.convention.keypoints_convention import get_keypoint_num
 from xrprimer.utils.ffmpeg_utils import video_to_array
 from xrprimer.utils.log_utils import get_logger
 
-try:
-    from mmcv import digit_version
-    from mmpose import __version__ as mmpose_version
-    from mmpose.apis import inference_top_down_pose_model, init_pose_model
-    has_mmpose = True
-    import_exception = ''
-except (ImportError, ModuleNotFoundError):
-    has_mmpose = False
-    import traceback
-    stack_str = ''
-    for line in traceback.format_stack():
-        if 'frozen' not in line:
-            stack_str += line + '\n'
-    import_exception = traceback.format_exc() + '\n'
-    import_exception = stack_str + import_exception
+from mmpose.apis import inference_topdown, init_model
 
 
 class MMposeTopDownEstimator:
 
     def __init__(self,
                  mmpose_kwargs: dict,
-                 bbox_thr: float = 0.0,
+                 batch_size: int = 1,
                  logger: Union[None, str, logging.Logger] = None) -> None:
         """Init a detector from mmpose.
 
@@ -46,18 +32,10 @@ class MMposeTopDownEstimator:
                 Defaults to None.
         """
         # build the pose model from a config file and a checkpoint file
-        self.pose_model = init_pose_model(**mmpose_kwargs)
-        # mmpose inference api takes one image per call
-        self.batch_size = 1
-        self.bbox_thr = bbox_thr
+        self.pose_model = init_model(**mmpose_kwargs)
+        # mmpose inference api takes one image per callj
+        self.batch_size = batch_size
         self.logger = get_logger(logger)
-        if not has_mmpose:
-            self.logger.error(import_exception)
-            raise ModuleNotFoundError(
-                'Please install mmpose to run detection.')
-        self.use_old_api = False
-        if digit_version(mmpose_version) <= digit_version('0.13.0'):
-            self.use_old_api = True
 
     def get_keypoints_convention_name(self) -> str:
         """Get data_source from dataset type in config file of the pose model.
@@ -68,13 +46,12 @@ class MMposeTopDownEstimator:
                 a key of KEYPOINTS_FACTORY.
         """
         return __translate_data_source__(
-            self.pose_model.cfg.data['test']['type'])
+            self.pose_model.cfg.test_dataloader.dataset.type)
 
     def infer_array(self,
                     image_array: Union[np.ndarray, list],
                     bbox_list: Union[tuple, list],
-                    disable_tqdm: bool = False,
-                    return_heatmap: bool = False) -> Tuple[list, list]:
+                    disable_tqdm: bool = False) -> Tuple[list, list]:
         """Infer frames already in memory(ndarray type).
 
         Args:
@@ -84,13 +61,10 @@ class MMposeTopDownEstimator:
                 len(list) == n_frame.
             bbox_list (Union[tuple, list]):
                 A list of human bboxes.
-                Shape of the nested lists is (n_frame, n_human, 5).
-                Each bbox is a bbox_xyxy with a bbox_score at last.
+                Shape of the nested lists is (n_frame, n_human, 4).
+                Each bbox is a bbox_xyxy.
             disable_tqdm (bool, optional):
                 Whether to disable the entire progressbar wrapper.
-                Defaults to False.
-            return_heatmap (bool, optional):
-                Whether to return heatmap.
                 Defaults to False.
 
         Returns:
@@ -100,79 +74,43 @@ class MMposeTopDownEstimator:
                     Shape of the nested lists is
                     (n_frame, n_human, n_keypoints, 3).
                     Each keypoint is an array of (x, y, confidence).
-                heatmap_list (list):
-                    A list of keypoint heatmaps. len(heatmap_list) == n_frame
-                    and the shape of heatmap_list[f] is
-                    (n_human, n_keypoints, width, height).
-                bbox_list (list):
-                    A list of human bboxes.
-                    Shape of the nested lists is (n_frame, n_human, 5).
-                    Each bbox is a bbox_xyxy with a bbox_score at last.
-                    It could be smaller than the input bbox_list,
-                    if there's no keypoints detected in some bbox.
         """
         ret_kps_list = []
-        ret_heatmap_list = []
-        ret_bbox_list = []
         n_frame = len(image_array)
-        n_kps = get_keypoint_num(self.get_keypoints_convention_name())
-        for start_index in tqdm(
-                range(0, n_frame, self.batch_size), disable=disable_tqdm):
+        for start_index in tqdm(range(0, n_frame, self.batch_size), disable=disable_tqdm, leave=False):
             end_index = min(n_frame, start_index + self.batch_size)
-            # mmpose takes only one frame
-            img_arr = image_array[start_index]
-            person_results = []
-            for frame_index in range(start_index, end_index, 1):
-                bboxes_in_frame = []
-                for idx, bbox in enumerate(bbox_list[frame_index]):
-                    if bbox[4] > 0.0:
-                        bboxes_in_frame.append({'bbox': bbox, 'id': idx})
-                person_results = bboxes_in_frame
-            if not self.use_old_api:
-                img_input = dict(imgs_or_paths=img_arr)
-            else:
-                img_input = dict(img_or_path=img_arr)
-            if len(bboxes_in_frame) > 0:
-                pose_results, returned_outputs = inference_top_down_pose_model(
-                    model=self.pose_model,
-                    person_results=person_results,
-                    bbox_thr=self.bbox_thr,
-                    format='xyxy',
-                    dataset=self.pose_model.cfg.data['test']['type'],
-                    return_heatmap=return_heatmap,
-                    outputs=None,
-                    **img_input)
-                frame_kps_results = np.zeros(
-                    shape=(
-                        len(bbox_list[frame_index]),
-                        n_kps,
-                        3,
-                    ))
-                frame_heatmap_results = [
-                    None,
-                ] * len(bbox_list[frame_index])
-                frame_bbox_results = np.zeros(
-                    shape=(len(bbox_list[frame_index]), 5))
-                for idx, person_dict in enumerate(pose_results):
-                    id = person_dict['id']
-                    bbox = person_dict['bbox']
-                    keypoints = person_dict['keypoints']
-                    frame_bbox_results[id] = bbox
-                    frame_kps_results[id] = keypoints
-                    if return_heatmap:
-                        # returned_outputs[0]['heatmap'].shape:
-                        # 1, 133, 96, 72
-                        frame_heatmap_results[id] = returned_outputs[0][
-                            'heatmap'][idx]
-                        ret_heatmap_list += [frame_heatmap_results]
-                frame_kps_results = frame_kps_results.tolist()
-                frame_bbox_results = frame_bbox_results.tolist()
-            else:
-                frame_kps_results = []
-                frame_bbox_results = []
-            ret_kps_list += [frame_kps_results]
-            ret_bbox_list += [frame_bbox_results]
-        return ret_kps_list, ret_heatmap_list, ret_bbox_list
+
+            # Extended to take multiple frames (account for no person detected)
+            img_batch = image_array[start_index:end_index]
+            bboxes_batch = []
+            for i, bboxes in enumerate(bbox_list[start_index:end_index]):
+                if len(bboxes) != 1:
+                    print(f"{len(bboxes)} people detected in frame {i+start_index}!")
+                    if len(bboxes) == 0:
+                        h,w = img_batch[0].shape[:2]
+                        bboxes_batch.append(np.array([0,0,w,h], dtype=np.float32))
+                    else:
+                        raise ValueError(f"This is a single person setting, but {len(bboxes)} people were detected!")
+                
+                else:
+                    bboxes_batch.append(bboxes[0])
+
+            pose_results = inference_topdown(
+                model=self.pose_model,
+                imgs=img_batch,
+                bboxes=bboxes_batch,
+                bbox_format='xyxy')
+
+            # Concatenate results (add n_human axis)
+            for frame_result in pose_results:
+                pred = frame_result.pred_instances
+
+                # NOTE: Visibility is interpreted as confidence
+                # ret_kps_list.append(np.expand_dims(np.hstack((np.squeeze(pred.keypoints), pred.keypoints_visible.T)), axis=0))
+                # NOTE: Scores are interpreted from raw logits
+                ret_kps_list.append(np.expand_dims(np.hstack((np.squeeze(pred.keypoints), pred.keypoint_scores.T)), axis=0))
+
+        return ret_kps_list
 
     def infer_frames(
             self,
@@ -314,10 +252,8 @@ class MMposeTopDownEstimator:
                     continue
                 for h_idx in range(n_human):
                     if h_idx < len(kps2d_list[f_idx]):
-                        mask_arr[f_idx, h_idx, ...] = np.sign(
-                            np.array(kps2d_list[f_idx][h_idx])[:, -1])
-                        kps2d_arr[f_idx,
-                                  h_idx, :, :] = kps2d_list[f_idx][h_idx]
+                        mask_arr[f_idx, h_idx, ...] = np.sign(kps2d_list[f_idx][h_idx, :, -1])
+                        kps2d_arr[f_idx, h_idx, :, :] = kps2d_list[f_idx][h_idx]
                     else:
                         mask_arr[f_idx, h_idx, ...] = 0
             keypoints2d = Keypoints(
@@ -333,7 +269,7 @@ class MMposeTopDownEstimator:
 def __translate_data_source__(mmpose_dataset_name):
     if mmpose_dataset_name == 'TopDownSenseWholeBodyDataset':
         return 'sense_whole_body'
-    elif mmpose_dataset_name == 'TopDownCocoWholeBodyDataset':
+    elif mmpose_dataset_name == 'TopDownCocoWholeBodyDataset' or mmpose_dataset_name == 'CocoWholeBodyDataset':
         return 'coco_wholebody'
     else:
         raise NotImplementedError
