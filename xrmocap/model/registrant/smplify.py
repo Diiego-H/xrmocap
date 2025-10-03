@@ -3,8 +3,8 @@ import logging
 import numpy as np
 import prettytable
 import torch
-from mmcv.runner import build_optimizer
-from mmcv.runner.hooks import Hook
+from mmengine.optim import build_optim_wrapper
+from mmengine.hooks import Hook
 from typing import List, Union
 from xrprimer.transform.convention.keypoints_convention import (  # noqa:E501
     get_keypoint_idx,
@@ -249,6 +249,9 @@ class SMPLify(object):
 
         for i in range(self.n_epochs):
             for stage_idx, stage_config in enumerate(self.stage_config):
+                # TODO: REMOVE
+                print("STAGE", stage_idx)
+                print(optim_param["betas"])
                 self.__optimize_stage__(
                     input_list=input_list,
                     optim_param=optim_param,
@@ -370,8 +373,12 @@ class SMPLify(object):
             for key, value in optim_param.items():
                 fit_flag = kwargs.pop(f'fit_{key}', True)
                 parameters.add_param(key=key, param=value, fit_param=fit_flag)
-            optimizers['default_optimizer'] = build_optimizer(
-                parameters, self.optimizer)
+            optimizers['default_optimizer'] = torch.optim.LBFGS(
+                params=parameters.parameters(),
+                max_iter=self.optimizer.get("max_iter", 20),
+                lr=self.optimizer.get("lr", 1.0),
+                line_search_fn=self.optimizer.get("line_search_fn", "strong_wolfe")
+            )
         else:
             # set an individual optimizer if optimizer config
             # is given and fit_{key} is True
@@ -391,8 +398,11 @@ class SMPLify(object):
                     value = _optim_param.pop(key)
                     parameters.add_param(
                         key=key, param=value, fit_param=fit_flag)
-                    optimizers[key] = build_optimizer(
-                        parameters, self.optimizer[f'{key}_optimizer'])
+                    optimizers[key] = optimizers['default_optimizer'] = torch.optim.LBFGS(
+                        params=parameters.parameters(),
+                        max_iter=self.optimizer.get("max_iter", 20),
+                        lr=self.optimizer.get("lr", 1.0),
+                        line_search_fn=self.optimizer.get("line_search_fn", "strong_wolfe"))
                     self.logger.info(f'Add an individual optimizer for {key}')
                 elif not fit_flag:
                     _optim_param.pop(key)
@@ -416,8 +426,11 @@ class SMPLify(object):
                         if fit_flag:
                             parameters.add_param(
                                 key=key, param=value, fit_param=fit_flag)
-                    optimizers['default_optimizer'] = build_optimizer(
-                        parameters, self.optimizer['default_optimizer'])
+                    optimizers['default_optimizer'] = torch.optim.LBFGS(
+                        params=parameters.parameters(),
+                        max_iter=self.optimizer.get("max_iter", 20),
+                        lr=self.optimizer.get("lr", 1.0),
+                        line_search_fn=self.optimizer.get("line_search_fn", "strong_wolfe"))
 
         previous_loss = None
         for iter_idx in range(n_iter):
