@@ -1,6 +1,7 @@
 # yapf: disable
 import logging
 import numpy as np
+import torch
 from typing import List, Tuple, Union, overload
 from xrprimer.data_structure import Keypoints
 from xrprimer.data_structure.camera import FisheyeCameraParameter
@@ -29,6 +30,15 @@ from .base_estimator import BaseEstimator
 
 # yapf: enable
 
+from ultralytics import YOLO
+
+# TODO: Refactor this
+import sys
+sys.path.append("/code/src/ba_joints")
+from my_bundle_adjustment import process as ba_process
+
+from mmdet.utils import register_all_modules as register_det_modules
+from mmpose.utils import register_all_modules as register_pose_modules
 
 class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
     """Api for estimating smpl in a multi-view single-person scene."""
@@ -237,13 +247,13 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
             keypoints3d=keypoints3d, init_smpl_data=init_smpl_data)
         return keypoints2d_list, keypoints3d, smpl_data
 
-    def estimate_keypoints2d(self, img_arr: np.ndarray) -> List[Keypoints]:
+    def estimate_keypoints2d(self, mview_imgs: List[np.ndarray]) -> List[Keypoints]:
         """Estimate keypoints2d in a top-down way.
 
         Args:
-            img_arr (np.ndarray):
-                A multi-view image array, in shape
-                [n_view, n_frame, h, w, c].
+            mview_imgs (List[np.ndarray]):
+                A multi-view image list, of length n_view.
+                Each element has shape [n_frame, h, w, c].
 
         Returns:
             List[Keypoints]:
@@ -251,16 +261,20 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
         """
         self.logger.info('Estimating keypoints2d.')
         ret_list = []
-        for view_index in range(img_arr.shape[0]):
-            view_img_arr = img_arr[view_index]
+        for view_index in range(len(mview_imgs)):
+            view_img_arr = mview_imgs[view_index]
+
+            register_det_modules()
             bbox_list = self.bbox_detector.infer_array(
                 image_array=view_img_arr,
                 disable_tqdm=(not self.verbose),
                 multi_person=False)
-            kps2d_list, _, _ = self.kps2d_estimator.infer_array(
+
+            register_pose_modules()
+            kps2d_list = self.kps2d_estimator.infer_array(
                 image_array=view_img_arr,
                 bbox_list=bbox_list,
-                disable_tqdm=(not self.verbose),
+                disable_tqdm=(not self.verbose)
             )
             if len(kps2d_list) == 1 and \
                     len(kps2d_list[0]) == 1 and \
@@ -269,8 +283,10 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
             keypoints2d = self.kps2d_estimator.get_keypoints_from_result(
                 kps2d_list)
             ret_list.append(keypoints2d)
+        self.logger.info('Finished estimating keypoints2d.')
         return ret_list
 
+    '''
     def estimate_keypoints3d(self, cam_param: List[FisheyeCameraParameter],
                              keypoints2d_list: List[Keypoints]) -> Keypoints:
         """Estimate keypoints3d by triangulation and optimizers if exists.
@@ -348,9 +364,149 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
                 keypoints3d = optimizer.optimize_keypoints3d(
                     keypoints3d, **optim_kwargs)
         return keypoints3d
+    '''
+    
+    def estimate_keypoints3d(self, cam_param: List[FisheyeCameraParameter], seq_data: dict, keypoints2d_list: List[Keypoints]) -> Keypoints:
+        """Estimate keypoints3d by triangulation and optimizers if exists.
+
+        Args:
+            seq_data (dict):
+                Data for bundle adjustment.
+            keypoints2d_list (List[Keypoints]):
+                A list of Keypoints2d, in same mask and convention,
+                and the time axis are aligned.
+
+        Returns:
+            Keypoints: A keypoints3d Keypoints instance.
+        """
+        self.logger.info('Estimating keypoints3d.')
+
+        # self.triangulator.set_cameras(cam_param)
+
+        # Prepare input np.ndarray
+        kps_arr_list = []
+        mask_list = []
+        default_keypoints2d = None
+        for keypoints2d in keypoints2d_list:
+            if keypoints2d is not None:
+                default_keypoints2d = keypoints2d.clone()
+                default_keypoints2d.set_keypoints(
+                    np.zeros_like(default_keypoints2d.get_keypoints()))
+                default_keypoints2d.set_mask(
+                    np.zeros_like(default_keypoints2d.get_mask()))
+                break
+        if default_keypoints2d is None:
+            self.logger.error('No one has been detected in any view.')
+            raise AttributeError
+        for keypoints2d in keypoints2d_list:
+            if keypoints2d is None:
+                keypoints2d = default_keypoints2d
+            if keypoints2d.dtype != 'numpy':
+                keypoints2d = keypoints2d.to_numpy()
+            kps_arr_list.append(keypoints2d.get_keypoints())
+            mask_list.append(keypoints2d.get_mask())
+        mview_kps2d_arr = np.asarray(kps_arr_list)
+        mview_mask = np.asarray(mask_list)
+
+        # Mask kps with low confidence
+        # PREV: 7.5
+        # mview_mask[...] &= mview_kps2d_arr[..., -1] >= 7.0
+
+        # Choose best cameras per keypoint/frame according to scores
+        xrmocap = False
+        # CURRENT BEST: 20
+        n_cam = 20
+
+        score_arr = mview_kps2d_arr[..., -1].squeeze()
+        top_cam = np.argsort(score_arr, axis=0)[-n_cam:, :, :]
+        new_mask = np.zeros_like(score_arr, dtype=np.int8)
+        np.put_along_axis(new_mask, top_cam, 1, axis=0)
+        new_mask = np.expand_dims(new_mask, axis=2)
+
+        # TODO: CHECK THIS IMPROVES!
+        mview_mask = new_mask
+
+        # XRMoCap triangulation
+        if xrmocap:
+            self.triangulator.set_cameras(cam_param)
+            kps3d_arr = self.triangulator.triangulate(
+                points=mview_kps2d_arr, points_mask=mview_mask)
+            kps3d_arr = np.concatenate(
+                (kps3d_arr, np.ones_like(kps3d_arr[..., 0:1])), axis=-1)
+            kps3d_mask = np.sum(mview_mask, axis=0, keepdims=False)
+            kps3d_mask = np.sign(np.abs(kps3d_mask))
+            if kps3d_mask.shape[-1] == 1:
+                kps3d_mask = kps3d_mask[..., 0]
+
+        else:
+            # Prepare output np.ndarray
+            kps2d_shape = mview_kps2d_arr.shape[1:]
+            kps3d_arr = np.zeros(shape=(kps2d_shape[:-1] + (kps2d_shape[-1] + 1,))) # [x,y,confidence] => [x,y,z,confidence] for kps
+            kps3d_mask = np.zeros(shape=kps2d_shape[:3])
+
+            # For each frame, perform bundle adjustment
+            # Hard coded for 300 frames (RPI have 301): THERE WILL BE ERRORS WITH THIS VERSION
+            # for i in range(len(default_keypoints2d["keypoints"])):
+            for i in range(kps2d_shape[0]):
+
+                # SKIP FIRST 5 FRAMES
+                if i < 5:
+                    continue
+
+                # Obtain landmarks
+                landmarks = {}
+                for view, sview_kps2d_arr, sview_mask in zip(seq_data["views"], mview_kps2d_arr, mview_mask):
+                    camera_data = {}
+
+                    # Confidence threshold?
+                    valid_ids = np.where(sview_mask[i,0,:])[0]
+
+                    # Skip if no valid ids
+                    if len(valid_ids) != 0:
+                        camera_data["ids"] = valid_ids.tolist()
+                        camera_data["landmarks"] = sview_kps2d_arr[i,0,valid_ids,:2].tolist()
+
+                        landmarks[view] = camera_data
+
+                    else:
+                        print("No valid ids for view", view, "frame", i)
+
+                # If there are landmarks, perform bundle adjustment
+                if len(landmarks) > 0:
+                    # Bundle adjustment
+                    ids, points_3d = ba_process(seq_data["ba_config"], list(landmarks.keys()), seq_data["intrinsics"], seq_data["extrinsics"], landmarks)
+
+                    # Update frame kpts
+                    kps3d_arr[i, 0, ids, :3] = points_3d
+                    kps3d_arr[i, 0, ids, 3] = 1
+                    kps3d_mask[i, 0, ids] = 1
+
+
+        keypoints3d = Keypoints(
+            dtype='numpy',
+            kps=kps3d_arr,
+            mask=kps3d_mask,
+            convention=default_keypoints2d.get_convention())
+
+        
+        optim_kwargs = dict(
+            mview_kps2d=mview_kps2d_arr,
+            mview_kps2d_mask=mview_mask)
+        if self.kps3d_optimizers is not None:
+            for optimizer in self.kps3d_optimizers:
+                if hasattr(optimizer, 'triangulator'):
+                    optimizer.triangulator = self.triangulator
+                keypoints3d = optimizer.optimize_keypoints3d(
+                    keypoints3d, **optim_kwargs)
+        
+
+        self.logger.info('Finished estimating keypoints3d.')
+        return keypoints3d
+    
 
     def estimate_smpl(self,
                       keypoints3d: Keypoints,
+                      vertices: Union[None, np.ndarray] = None,
                       init_smpl_data: Union[None, SMPLData] = None,
                       return_joints: bool = False,
                       return_verts: bool = False) -> SMPLData:
@@ -361,6 +517,8 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
                 A keypoints3d Keypoints instance, with only one person
                 inside. This method will take the person at
                 keypoints3d.get_keypoints()[:, 0, ...] to run smplify.
+            vertices (np.ndarray, optional):
+                Vertices to guide the shape fitting.
             init_smpl_dict (dict, optional):
                 A dict of init parameters. init_dict.keys() is a
                 sub-set of self.__class__.OPTIM_PARAM.
@@ -381,6 +539,9 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
         keypoints3d = keypoints3d.to_tensor(device=self.smplify.device)
         kps3d_tensor = keypoints3d.get_keypoints()[:, 0, :, :3].float()
         kps3d_conf = keypoints3d.get_mask()[:, 0, ...]
+
+        # Convert kpts to m (from mm)
+        kps3d_tensor /= 1000
 
         # load init smpl data
         if init_smpl_data is not None:
@@ -405,8 +566,27 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
                 keypoints3d_convention=working_convention,
                 handler_key='keypoints3d_limb_len'))
 
+        input_list = [kp3d_mse_input, kp3d_llen_input]
+
+        # Add vertices input to guide the shape fitting
+        if vertices is not None:
+            # Convert vertices to tensor in m (from mm)
+            vert_tensor = torch.from_numpy(vertices).float().to(self.smplify.device)
+            vert_tensor /= 1000
+
+            # Expand to same batch size as keypoints
+            batch_size = kps3d_tensor.shape[0]
+            vert_tensor = vert_tensor.unsqueeze(0).expand(batch_size,-1,-1)
+            
+            chamfer_input = build_handler(
+                dict(
+                    type='ChamferDistanceInput',
+                    vertices=vert_tensor,
+                    handler_key='chamfer_distance'))
+            input_list.append(chamfer_input)
+
         registrant_output = self.smplify(
-            input_list=[kp3d_mse_input, kp3d_llen_input],
+            input_list=input_list,
             init_param_dict=init_smpl_dict,
             return_joints=return_joints,
             return_verts=return_verts)
@@ -419,10 +599,14 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
         smpl_data.from_param_dict(registrant_output)
 
         if return_joints:
-            smpl_data['joints'] = registrant_output['joints']
+            smpl_data['joints'] = registrant_output['joints'].cpu().numpy()
         if return_verts:
-            smpl_data['vertices'] = registrant_output['vertices']
+            smpl_data['vertices'] = registrant_output['vertices'].cpu().numpy()
 
+        # Convert vertices to mm (from m)
+        smpl_data['vertices'] *= 1000
+
+        self.logger.info('Finished estimating SMPL.')
         return smpl_data
 
     def select_camera(self, cam_param: List[FisheyeCameraParameter],
