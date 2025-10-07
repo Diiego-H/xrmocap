@@ -40,12 +40,11 @@ class ChamferDistanceLoss(nn.Module):
         target2pred, _ = torch.min(diffs, dim=0)       # (V2,)
 
         # Chamfer distance
+        # TODO: Polish this
         # loss = pred2target.mean() + target2pred.mean()
         # loss = 0.5 * pred2target.mean() + 0.5 * target2pred.mean()
-        # TRYING COVERAGE FROM SMPL-X TO DEPTH
+        # TRYING COVERAGE FROM SMPL-X TO DEPTH, it improves when body_only
         loss = pred2target.mean()
-
-        print(loss)
 
         loss = loss_weight * loss
         return loss

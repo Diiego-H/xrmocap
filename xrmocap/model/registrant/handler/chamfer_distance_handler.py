@@ -8,7 +8,7 @@ from .base_handler import BaseHandler, BaseInput
 
 _ChamferDistanceLoss = TypeVar('_ChamferDistanceLoss')
 
-with open("/code/src/my_list.pkl", "rb") as f:
+with open("/data/body_models/smplx_body_vertices.pkl", "rb") as f:
     smpl_idxs = pickle.load(f)
 
 class ChamferDistanceInput(BaseInput):
@@ -122,12 +122,13 @@ class ChamferDistanceHandler(BaseHandler):
                 A Tensor of loss result.
         """
 
+        # TODO: CHECK WHEN READY DATA
         # 20th frame is used
         source_vertices = model_vertices[20, ...]
         target_vertices = related_input.vertices[20, ...]
 
-        # CHECK: ONLY USE VERTICES FROM TORSO
-        # source_vertices = source_vertices[smpl_idxs]
+        # NOTE: ONLY USE VERTICES FROM TORSO
+        source_vertices = source_vertices[smpl_idxs]
 
         chamfer_distance = self.loss(
             pred=source_vertices,
