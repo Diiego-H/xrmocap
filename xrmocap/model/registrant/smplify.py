@@ -249,9 +249,6 @@ class SMPLify(object):
 
         for i in range(self.n_epochs):
             for stage_idx, stage_config in enumerate(self.stage_config):
-                # TODO: REMOVE
-                print("STAGE", stage_idx)
-                print(optim_param["betas"])
                 self.__optimize_stage__(
                     input_list=input_list,
                     optim_param=optim_param,

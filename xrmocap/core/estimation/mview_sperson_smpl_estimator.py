@@ -437,10 +437,9 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
 
         # load init smpl data
         if init_smpl_data is not None:
-            init_dict = init_smpl_data.to_tensor_dict(device=self.smplify.device)
+            init_dict = init_smpl_data.to_tensor_dict(repeat_betas=False, device=self.smplify.device)
 
             # Use only the betas
-            print("BETAS SHAPE:", init_dict["betas"].shape)
             init_smpl_dict = {"betas": init_dict["betas"]}
         else:
             init_smpl_dict = {}
