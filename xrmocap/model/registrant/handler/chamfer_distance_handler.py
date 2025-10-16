@@ -122,10 +122,9 @@ class ChamferDistanceHandler(BaseHandler):
                 A Tensor of loss result.
         """
 
-        # TODO: CHECK WHEN READY DATA
-        # 20th frame is used
-        source_vertices = model_vertices[20, ...]
-        target_vertices = related_input.vertices[20, ...]
+        # First frame is used
+        source_vertices = model_vertices[0, ...]
+        target_vertices = related_input.vertices[0, ...]
 
         # NOTE: ONLY USE VERTICES FROM TORSO
         source_vertices = source_vertices[smpl_idxs]
