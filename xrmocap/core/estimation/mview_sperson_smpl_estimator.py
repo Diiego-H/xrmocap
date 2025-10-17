@@ -1,8 +1,10 @@
 # yapf: disable
+import os
+import torch
 import logging
 import numpy as np
-import torch
-from typing import List, Tuple, Union, overload
+from time import perf_counter
+from typing import Any, Dict, List, Tuple, Union, overload, Optional
 from xrprimer.data_structure import Keypoints
 from xrprimer.data_structure.camera import FisheyeCameraParameter
 from xrprimer.transform.convention.keypoints_convention import (
@@ -30,6 +32,7 @@ from .base_estimator import BaseEstimator
 
 # yapf: enable
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from ultralytics import YOLO
 
 # TODO: Refactor this
@@ -39,6 +42,55 @@ from my_bundle_adjustment import process as ba_process
 
 from mmdet.utils import register_all_modules as register_det_modules
 from mmpose.utils import register_all_modules as register_pose_modules
+
+
+_PROCESS_FRAME_CONTEXT: Dict[str, Any] = {}
+
+
+def _process_frame_initializer(context: Dict[str, Any]) -> None:
+    """Initializer to share read-only data with each process worker."""
+    global _PROCESS_FRAME_CONTEXT
+    _PROCESS_FRAME_CONTEXT = context
+
+
+def _run_process_frame(frame_idx: int, context: Dict[str, Any]) -> Tuple[int, Union[None, List[int]], Union[None, List[List[float]]]]:
+    """Core implementation shared by threaded and process-based execution."""
+    views: List[str] = context["views"]
+    mview_kps2d_arr: np.ndarray = context["mview_kps2d_arr"]
+    mview_mask: np.ndarray = context["mview_mask"]
+    verbose: bool = context["verbose"]
+
+    landmarks = {}
+    for view_idx, view in enumerate(views):
+        sview_kps2d_arr = mview_kps2d_arr[view_idx]
+        sview_mask = mview_mask[view_idx]
+        valid_ids = np.where(sview_mask[frame_idx, 0, :])[0]
+        if len(valid_ids) != 0:
+            camera_data = {
+                "ids": valid_ids.tolist(),
+                "landmarks": sview_kps2d_arr[
+                    frame_idx, 0, valid_ids, :2
+                ].tolist(),
+            }
+            landmarks[view] = camera_data
+        elif verbose:
+            print("No valid ids for view", view, "frame", frame_idx)
+
+    if len(landmarks) == 0:
+        return frame_idx, None, None
+
+    ids, points_3d = ba_process(
+        context["ba_config"],
+        list(landmarks.keys()),
+        context["intrinsics"],
+        context["extrinsics"],
+        landmarks,
+    )
+    return frame_idx, ids, points_3d
+
+
+def _process_frame_worker(frame_idx: int) -> Tuple[int, Union[None, List[int]], Union[None, List[List[float]]]]:
+    return _run_process_frame(frame_idx, _PROCESS_FRAME_CONTEXT)
 
 class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
     """Api for estimating smpl in a multi-view single-person scene."""
@@ -55,6 +107,7 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
                  kps3d_optimizers: Union[List[Union[BaseOptimizer, dict]],
                                          None] = None,
                  load_batch_size: int = 500,
+                 triangulation_workers: Optional[int] = None,
                  verbose: bool = True,
                  logger: Union[None, str, logging.Logger] = None) -> None:
         """Initialization of the class.
@@ -92,6 +145,10 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
                 Defaults to None.
             load_batch_size (int, optional):
                 How many frames are loaded at the same time. Defaults to 500.
+            triangulation_workers (int, optional):
+                Maximum number of worker threads used while triangulating
+                keypoints across frames. If None, defaults to the number of
+                available CPU cores. Must be a positive integer.
             verbose (bool, optional):
                 Whether to print(logger.info) information during estimating.
                 Defaults to True.
@@ -101,6 +158,12 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
         """
         super().__init__(work_dir, verbose, logger)
         self.load_batch_size = load_batch_size
+
+        if triangulation_workers is None:
+            triangulation_workers = os.cpu_count() or 1
+        if triangulation_workers < 1:
+            raise ValueError('triangulation_workers must be a positive integer.')
+        self.triangulation_workers = triangulation_workers
 
         if isinstance(bbox_detector, dict):
             bbox_detector['logger'] = logger
@@ -260,22 +323,36 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
                 A list of keypoints2d instances.
         """
         self.logger.info('Estimating keypoints2d.')
+        self.last_keypoints2d_timings = {
+            'per_camera': [],
+            'total': 0.0,
+        }
         ret_list = []
-        for view_index in range(len(mview_imgs)):
-            view_img_arr = mview_imgs[view_index]
+        overall_start = perf_counter()
+        for view_index, view_img_arr in enumerate(mview_imgs):
+            view_start = perf_counter()
+            if hasattr(view_img_arr, 'shape') and len(view_img_arr.shape) > 0:
+                num_frames = int(view_img_arr.shape[0])
+            else:
+                num_frames = len(view_img_arr)
 
             register_det_modules()
+            bbox_start = perf_counter()
             bbox_list = self.bbox_detector.infer_array(
                 image_array=view_img_arr,
                 disable_tqdm=(not self.verbose),
                 multi_person=False)
+            bbox_elapsed = perf_counter() - bbox_start
 
             register_pose_modules()
+            pose_start = perf_counter()
             kps2d_list = self.kps2d_estimator.infer_array(
                 image_array=view_img_arr,
                 bbox_list=bbox_list,
                 disable_tqdm=(not self.verbose)
             )
+            pose_elapsed = perf_counter() - pose_start
+
             if len(kps2d_list) == 1 and \
                     len(kps2d_list[0]) == 1 and \
                     kps2d_list[0][0] is None:
@@ -283,10 +360,32 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
             keypoints2d = self.kps2d_estimator.get_keypoints_from_result(
                 kps2d_list)
             ret_list.append(keypoints2d)
-        self.logger.info('Finished estimating keypoints2d.')
+
+            view_elapsed = perf_counter() - view_start
+            self.last_keypoints2d_timings['per_camera'].append({
+                'view_index': view_index,
+                'num_frames': num_frames,
+                'bbox_detection': bbox_elapsed,
+                'pose_inference': pose_elapsed,
+                'total': view_elapsed,
+            })
+            self.logger.info(
+                'Keypoints2d timing - view %d: total %.3fs '
+                '(bbox %.3fs, pose %.3fs) for %d frames.',
+                view_index,
+                view_elapsed,
+                bbox_elapsed,
+                pose_elapsed,
+                num_frames,
+            )
+
+        overall_elapsed = perf_counter() - overall_start
+        self.last_keypoints2d_timings['total'] = overall_elapsed
+        self.logger.info(
+            'Finished estimating keypoints2d in %.3fs.', overall_elapsed)
         return ret_list
 
-    def estimate_keypoints3d(self, cam_param: List[FisheyeCameraParameter], seq_data: dict, keypoints2d_list: List[Keypoints], n_cam: int = 20) -> Keypoints:
+    def estimate_keypoints3d(self, cam_param: List[FisheyeCameraParameter], seq_data: dict, keypoints2d_list: List[Keypoints], n_cam: int = 4) -> Keypoints:
         """Estimate keypoints3d by triangulation and optimizers if exists.
 
         Args:
@@ -333,46 +432,71 @@ class MultiViewSinglePersonSMPLEstimator(BaseEstimator):
         mview_kps2d_arr = np.asarray(kps_arr_list)
         mview_mask = np.asarray(mask_list)
 
-        # Choose best cameras per keypoint per frame
+        # Choose best cameras per keypoint per frame using top-n selection
         score_arr = mview_kps2d_arr[..., -1].squeeze()
-        top_cam = np.argsort(score_arr, axis=0)[-n_cam:, :, :]
-        new_mask = np.zeros_like(score_arr, dtype=np.int8)
-        np.put_along_axis(new_mask, top_cam, 1, axis=0)
+        if score_arr.ndim == 2:
+            score_arr = score_arr[:, np.newaxis, :]
+        elif score_arr.ndim == 1:
+            score_arr = score_arr[:, np.newaxis, np.newaxis]
+        if n_cam >= score_arr.shape[0]:
+            new_mask = np.ones_like(score_arr, dtype=np.int8)
+        else:
+            kth = score_arr.shape[0] - n_cam
+            partitioned = np.argpartition(score_arr, kth, axis=0)
+            top_cam = partitioned[-n_cam:, :, :]
+            new_mask = np.zeros_like(score_arr, dtype=np.int8)
+            np.put_along_axis(new_mask, top_cam, 1, axis=0)
         new_mask = np.expand_dims(new_mask, axis=2)
         mview_mask = new_mask
 
         # Prepare output np.ndarray
         kps2d_shape = mview_kps2d_arr.shape[1:]
-        kps3d_arr = np.zeros(shape=(kps2d_shape[:-1] + (kps2d_shape[-1] + 1,))) # [x,y,confidence] => [x,y,z,confidence] for kps
+        kps3d_arr = np.zeros(
+            shape=(kps2d_shape[:-1] + (kps2d_shape[-1] + 1,)))
+        # [x,y,confidence] => [x,y,z,confidence] for kps
         kps3d_mask = np.zeros(shape=kps2d_shape[:3])
 
-        # For each frame, perform bundle adjustment
-        for i in range(kps2d_shape[0]):
-            # Obtain landmarks
-            landmarks = {}
-            for view, sview_kps2d_arr, sview_mask in zip(seq_data["views"], mview_kps2d_arr, mview_mask):
-                camera_data = {}
+        context: Dict[str, Any] = {
+            "views": seq_data["views"],
+            "mview_kps2d_arr": mview_kps2d_arr,
+            "mview_mask": mview_mask,
+            "ba_config": seq_data["ba_config"],
+            "intrinsics": seq_data["intrinsics"],
+            "extrinsics": seq_data["extrinsics"],
+            "verbose": self.verbose,
+        }
+        # Ensure arrays remain read-only when shared across processes
+        for key in ("mview_kps2d_arr", "mview_mask"):
+            try:
+                context[key].setflags(write=False)
+            except ValueError:
+                # Some numpy views may not allow toggling flags; ignore
+                pass
 
-                # Valid kps for this camera and frame
-                valid_ids = np.where(sview_mask[i,0,:])[0]
+        frame_indices = range(kps2d_shape[0])
+        max_workers = max(1, min(self.triangulation_workers, kps2d_shape[0]))
 
-                # Skip camera if no valid kps
-                if len(valid_ids) != 0:
-                    camera_data["ids"] = valid_ids.tolist()
-                    camera_data["landmarks"] = sview_kps2d_arr[i,0,valid_ids,:2].tolist()
-                    landmarks[view] = camera_data
-                else:
-                    print("No valid ids for view", view, "frame", i)
+        if max_workers == 1 or kps2d_shape[0] == 1:
+            frame_results = [_run_process_frame(i, context) for i in frame_indices]
+        else:
+            frame_results = []
+            with ProcessPoolExecutor(
+                max_workers=max_workers,
+                initializer=_process_frame_initializer,
+                initargs=(context,),
+            ) as executor:
+                futures = [executor.submit(_process_frame_worker, i) for i in frame_indices]
+                for future in as_completed(futures):
+                    frame_results.append(future.result())
+            # Sort results to keep deterministic order for downstream steps
+            frame_results.sort(key=lambda item: item[0])
 
-            # If there are landmarks, perform bundle adjustment
-            if len(landmarks) > 0:
-                # Bundle adjustment
-                ids, points_3d = ba_process(seq_data["ba_config"], list(landmarks.keys()), seq_data["intrinsics"], seq_data["extrinsics"], landmarks)
-
-                # Update frame kpts
-                kps3d_arr[i, 0, ids, :3] = points_3d
-                kps3d_arr[i, 0, ids, 3] = 1
-                kps3d_mask[i, 0, ids] = 1
+        for frame_idx, ids, points_3d in frame_results:
+            if ids is None:
+                continue
+            kps3d_arr[frame_idx, 0, ids, :3] = points_3d
+            kps3d_arr[frame_idx, 0, ids, 3] = 1
+            kps3d_mask[frame_idx, 0, ids] = 1
 
         # Create Keypoints object
         keypoints3d = Keypoints(
